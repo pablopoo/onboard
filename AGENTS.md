@@ -21,6 +21,15 @@ Primary use case: share the viewer tab in Google Meet while drawing from another
 - Must keep presenter controls out of the shared viewer.
 - Must make the happy path obvious: start app, open board, open viewer, draw.
 
+## Core App Requirements
+
+- Support whiteboard and blueboard surfaces with marker tools.
+- Support blackboard and greenboard surfaces with chalk tools.
+- Keep drawing controls on the Board only.
+- Keep the Viewer content-only: board background, strokes, eraser effects, explicit pointer, and unexpired ephemeral strokes.
+- Presenter tools include board surface, compatible pen type, eraser, clear all, pointer, and ephemeral write mode.
+- Image generation may be used for board surface textures, icon references, visual references, and lightweight UI assets when useful. Do not use generated images as a substitute for the core drawing, sync, or canvas logic.
+
 ## Engineering Direction
 
 Default technical direction until proven otherwise:
@@ -30,6 +39,8 @@ Default technical direction until proven otherwise:
 - One route for the viewer.
 - WebSocket-based sync between board and viewer.
 - Canvas-based rendering first, unless a later phase proves SVG or a library is better.
+
+Follow the project tree documented in `docs/architecture.md`. Keep shared browser product logic in `web/core`, runtime adapters in `web/transports`, Go local relay code in `internal/hub`, and hosted WebRTC signaling code in `internal/signaling`.
 
 ## Working Rules For Codex
 
@@ -49,4 +60,3 @@ Phase 01 is foundation only:
 - Define agent responsibilities.
 - Define phased roadmap.
 - Avoid app implementation until the foundation is clear.
-

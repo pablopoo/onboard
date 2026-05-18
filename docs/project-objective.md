@@ -17,10 +17,38 @@ The viewer must show what was drawn, not the drawing controls.
 
 - The app runs locally and is reachable by other devices on the same local network.
 - The board supports drawing on a surface similar to a school board.
+- The board supports four board surfaces:
+  - Whiteboard: marker tools.
+  - Blackboard: chalk tools.
+  - Greenboard: chalk tools.
+  - Blueboard: marker tools.
 - The viewer mirrors the board drawing output.
 - The viewer hides all controls.
+- The presenter has controls for board type, compatible pen type, clear all, eraser, pointer, and ephemeral writing.
 - Pointer display is explicit, not automatic.
+- Ephemeral writing is temporary: strokes fade or disappear after a configured number of seconds.
 - The first implementation should be small and understandable.
+
+## Presenter Tools
+
+Presenter controls belong only on the Board surface:
+
+- Board type selector.
+- Tool selector constrained by board type.
+- Clear all.
+- Eraser.
+- Pointer.
+- Ephemeral write mode.
+
+The Viewer surface must show board content only:
+
+- Current board background.
+- Drawing strokes.
+- Eraser effects.
+- Explicit pointer when active.
+- Ephemeral strokes until they expire.
+
+The Viewer must not show drawing tools, selectors, or presenter-only controls.
 
 ## Design Priorities
 
@@ -32,8 +60,6 @@ The viewer must show what was drawn, not the drawing controls.
 
 ## Open Decisions
 
-- Exact app stack.
-- Whether drawing state is event-based, bitmap-based, or hybrid.
 - Whether first persistence is in-memory only or file-backed.
-- How much pointer tooling belongs in version one.
-
+- Exact visual treatment for chalk versus marker strokes.
+- Exact default expiration time for ephemeral writing.

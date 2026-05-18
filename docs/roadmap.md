@@ -43,7 +43,8 @@ Expected deliverables:
 
 - Canvas drawing surface
 - Pen input and mouse input
-- Basic stroke color
+- Board surfaces: whiteboard, blackboard, greenboard, blueboard
+- Compatible tools: markers for white/blue boards, chalk for black/green boards
 - Basic stroke width
 - Clear board action
 
@@ -51,6 +52,7 @@ Success check:
 
 - Drawing works from a touch device.
 - The page does not scroll while drawing.
+- Viewer shows the selected board surface and content, not presenter controls.
 
 ## Phase 04: Live Viewer Sync
 
@@ -76,13 +78,15 @@ Expected deliverables:
 
 - Explicit pointer mode
 - Undo
-- Eraser or clear mode
+- Eraser
+- Clear all
+- Ephemeral write mode with automatic expiration
 - Minimal visual polish
 - Basic connection status
 
 Success check:
 
-- Presenter can draw, point, undo, and clear without exposing controls to the viewer.
+- Presenter can draw, erase, point, write temporarily, undo, and clear without exposing controls to the viewer.
 
 ## Phase 06: Hardening
 
@@ -99,4 +103,3 @@ Expected deliverables:
 Success check:
 
 - A fresh user can start the app and use it from two local devices using the README.
-
