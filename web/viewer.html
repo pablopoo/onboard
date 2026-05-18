@@ -8,7 +8,9 @@
   </head>
   <body class="drawing-page">
     <main id="viewer-app" class="viewer-shell">
-      <canvas id="viewer-canvas" class="board-canvas"></canvas>
+      <canvas id="viewer-canvas" class="board-canvas" data-viewer-canvas></canvas>
+      <p id="viewer-status" class="viewer-status" data-viewer-status aria-live="polite">Connecting</p>
     </main>
+    <script type="module" src="/viewer/viewer.js"></script>
   </body>
 </html>

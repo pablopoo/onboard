@@ -71,6 +71,7 @@ body {
 }
 
 .viewer-shell {
+  position: relative;
   display: block;
 }
 
@@ -148,6 +149,20 @@ body {
   background: #ffffff;
   touch-action: none;
   user-select: none;
+}
+
+.viewer-status {
+  position: absolute;
+  right: 0.75rem;
+  bottom: 0.75rem;
+  margin: 0;
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.25rem;
+  background: rgb(15 23 42 / 0.72);
+  color: #ffffff;
+  font-size: 0.75rem;
+  line-height: 1.2;
+  pointer-events: none;
 }
 
 @media (max-width: 640px) {
