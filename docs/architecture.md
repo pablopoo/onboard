@@ -1,31 +1,58 @@
 # Architecture Notes
 
-This is the initial direction, not a final contract.
+Onboard uses one shared browser core with two runtime approaches.
 
-## Proposed Shape
+The shared browser core is product logic. It owns the event protocol, board
+state, canvas rendering rules, surface/tool compatibility, pointer state, and
+ephemeral stroke behavior. Runtime transports only move events between Board and
+Viewer.
 
-Use a small local server that serves the board and viewer pages and owns live synchronization.
+## Selected Approaches
+
+Approach 1 is the end-user local binary.
 
 ```text
-Drawing device
+Board browser
   /board
-  canvas + controls
-  sends stroke events
+  canvas + presenter controls
+  sends board events over WebSocket
 
-Local server
-  static pages
-  WebSocket hub
-  in-memory board state
+Go local binary
+  serves embedded web files
+  owns /ws/relay
+  keeps in-memory event state
+  broadcasts events to connected browsers
 
-Shared browser tab
+Viewer browser
   /viewer
   canvas only
-  receives stroke events
+  receives board events over WebSocket
 ```
 
-## Project Tree
+Approach 3 is the no-install hosted pairing path.
 
-Target structure for the shared-core architecture:
+```text
+Board browser
+  /board?transport=webrtc
+  creates or joins a paired session
+  sends board events over WebRTC DataChannel
+
+Go hosted signaling server
+  serves the same web app
+  owns /signal
+  exchanges session, offer, answer, and ICE messages
+  does not carry drawing events after DataChannel setup succeeds
+
+Viewer browser
+  /viewer?transport=webrtc
+  canvas only
+  receives board events over WebRTC DataChannel
+```
+
+Both approaches use the same `web/core` product logic. The difference is only
+the transport adapter under `web/transports`.
+
+## Project Tree
 
 ```text
 onboard/
@@ -61,9 +88,11 @@ onboard/
 
     board/
       board.js
+      board.test.mjs
 
     viewer/
       viewer.js
+      viewer.test.mjs
 
     transports/
       transport-contract.js
@@ -82,7 +111,7 @@ onboard/
   tests/
     install-go-latest-test.sh
     build-release-test.sh
-    browser-smoke.md or browser-smoke.sh
+    local-browser-smoke.sh
 
   docs/
     architecture.md
@@ -102,35 +131,41 @@ onboard/
 Directory responsibilities:
 
 - `cmd/onboard`: executable entrypoint.
-- `internal/server`: HTTP routes, static serving, and mode wiring.
+- `internal/server`: HTTP routes, static serving, WebSocket relay endpoint, and
+  signaling endpoint.
 - `internal/hub`: Approach 1 local relay state and broadcast.
-- `internal/signaling`: Approach 3 pairing and WebRTC signaling only.
+- `internal/signaling`: Approach 3 session pairing and WebRTC signaling.
 - `web/core`: shared browser-side product logic.
 - `web/transports`: event movement adapters.
-- `web/board`: Board UI controller.
-- `web/viewer`: Viewer UI controller.
+- `web/board`: Board presenter controller.
+- `web/viewer`: Viewer content-only controller.
 - `web/assets.go`: embeds the static web app into the Go binary.
 - `scripts`: local development and release tooling.
 - `tests`: shell, release, and smoke checks.
 
 ## Routes
 
-- `/board`: presenter surface with drawing tools.
-- `/viewer`: clean output surface for screen sharing.
-- `/health`: simple readiness endpoint if useful.
+- `/`: home page with relay and WebRTC links.
+- `/board`: presenter surface using the local WebSocket relay.
+- `/viewer`: content-only viewer using the local WebSocket relay.
+- `/board?transport=webrtc`: presenter surface using WebRTC DataChannel.
+- `/viewer?transport=webrtc`: content-only viewer using WebRTC DataChannel.
+- `/ws/relay`: Approach 1 WebSocket event relay.
+- `/signal`: Approach 3 WebSocket signaling endpoint.
+- `/health`: readiness endpoint.
 
-## Sync Model
+## Event Model
 
-Start with stroke events instead of video streaming or bitmap streaming.
+Onboard syncs drawing events instead of video or bitmap frames.
 
 Why:
 
 - Smaller payloads.
-- Easy to replay for new viewers.
-- Easier to support undo later.
-- Keeps implementation inspectable.
+- Easy replay for new viewers.
+- Inspectable state transitions.
+- Same event stream can move over WebSocket or WebRTC DataChannel.
 
-Initial event types can be:
+Core event types:
 
 - `board:set-surface`
 - `stroke:start`
@@ -148,12 +183,16 @@ Supported board surfaces:
 
 ```text
 whiteboard -> marker tools
+blueboard  -> marker tools
 blackboard -> chalk tools
 greenboard -> chalk tools
-blueboard -> marker tools
 ```
 
-Stroke payloads should carry their rendering style so old strokes remain visually stable after the presenter changes tools:
+Presenter tools include board surface, compatible pen type, eraser, clear all,
+pointer, and ephemeral write.
+
+Stroke payloads carry rendering style so existing strokes remain visually stable
+after the presenter changes tools:
 
 ```text
 tool: marker | chalk | eraser
@@ -163,47 +202,48 @@ ephemeral: boolean
 expiresAt: timestamp, only for ephemeral strokes
 ```
 
-The eraser is modeled as a drawing tool in the event stream, not as a viewer control. Clear all is modeled as `board:clear`.
+The eraser is modeled as a drawing tool in the event stream, not as a viewer
+control. Clear all is modeled as `board:clear`. The pointer is separate from
+drawing and must not create strokes.
 
-The pointer is separate from drawing. Pointer events update explicit pointer state and must not create strokes.
+## Viewer Contract
 
-## Visual Assets
+The Viewer is content-only. It shows:
 
-Image generation is allowed when it helps the app feel like a real board without adding unnecessary implementation complexity.
+- Board background.
+- Strokes.
+- Eraser effects.
+- Explicit pointer only when the presenter uses pointer mode.
+- Unexpired ephemeral strokes.
 
-Good uses:
-
-- Subtle whiteboard, blackboard, greenboard, or blueboard surface texture references.
-- Icon references for presenter controls.
-- Visual references for chalk versus marker treatment.
-- Lightweight bitmap assets if CSS/canvas alone is not enough.
-
-Constraints:
-
-- Generated assets must not replace the core canvas drawing model.
-- Generated assets must not be required for sync correctness.
-- Keep assets small and inspectable.
-- Prefer CSS/canvas rendering when it is sufficient.
+The Viewer never shows presenter controls.
 
 ## State
 
-Initial state should be in memory.
-
-That means:
+Approach 1 keeps state in memory in the local Go process.
 
 - Restarting the server clears the board.
-- A newly connected viewer receives current in-memory strokes.
+- A newly connected relay viewer receives current in-memory events.
 - Persistence is deferred until there is a real need.
 
-## First Stack Preference
+Approach 3 uses the same browser state model after pairing. The signaling server
+exists to pair browsers and exchange WebRTC setup messages; the DataChannel
+carries drawing events.
 
-The first implementation should prefer the smallest stack that handles:
+## Release Builds
 
-- HTTP static serving.
-- WebSocket connections.
-- Simple browser JavaScript.
+Release binaries are cross-compiled with `CGO_ENABLED=0` using
+`/usr/local/go/bin/go build`.
 
-A likely candidate is Node.js with a minimal server and the `ws` package, but that decision belongs to Phase 02.
+```text
+dist/onboard-linux-amd64
+dist/onboard-windows-amd64.exe
+dist/onboard-macos-amd64
+dist/onboard-macos-arm64
+```
+
+The build script is `scripts/build-release.sh`; its shell check is
+`tests/build-release-test.sh`.
 
 ## Risks To Watch
 
@@ -211,4 +251,5 @@ A likely candidate is Node.js with a minimal server and the `ws` package, but th
 - Canvas sizes must match cleanly between board and viewer.
 - Different device pixel ratios can make strokes blurry or offset.
 - WebSocket reconnects need simple behavior before real use.
+- WebRTC connection setup needs clear pairing and failure states.
 - Viewer must never show board controls.

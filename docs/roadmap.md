@@ -1,105 +1,109 @@
 # Roadmap
 
-This project should move in phases. Each phase should stay small enough to verify manually.
+This project moves in small phases that can be verified manually and with
+focused automated checks.
 
-## Phase 01: Foundation
+## Completed Baseline
 
-Purpose: establish the project structure and working conventions.
+The foundation and baseline app are in place.
 
-Deliverables:
+Delivered:
 
-- `AGENTS.md`
-- `README.md`
-- Project objective document
-- Roadmap
-- Architecture notes
-- Codex role files
-- First phase task note
+- Product objective and working conventions.
+- Go executable entrypoint.
+- Embedded vanilla JavaScript web app.
+- `/`, `/board`, `/viewer`, `/health`, `/ws/relay`, and `/signal` routes.
+- Shared browser core in `web/core`.
+- Board presenter controller in `web/board`.
+- Viewer content-only controller in `web/viewer`.
+- Approach 1 local WebSocket relay in `internal/hub`.
+- Approach 3 signaling registry in `internal/signaling`.
+- WebSocket relay transport.
+- WebRTC DataChannel transport.
+- Unit tests for Go server pieces and browser product logic.
+- Local browser smoke script.
 
-No app code in this phase.
+## Current Architecture Phase: Dual Runtime Paths
 
-## Phase 02: Minimal Local App
+Purpose: keep one product implementation while supporting the two useful
+delivery models.
 
-Purpose: prove that the app can run locally and expose two routes.
+Approach 1 is the local end-user binary:
 
-Expected deliverables:
+- Go serves embedded assets.
+- Go owns the local WebSocket relay.
+- Board and Viewer exchange product events through `/ws/relay`.
+- This is the default route for LAN use and Google Meet screen sharing.
 
-- Local web server
-- `/board` route
-- `/viewer` route
-- Basic static pages
-- LAN-friendly startup instructions
+Approach 3 is the no-install hosted pairing path:
 
-Success check:
+- Go serves the same browser app.
+- Go owns hosted signaling through `/signal`.
+- Board and Viewer pair, then exchange product events over WebRTC DataChannel.
+- This path is for hosted use where users open a URL instead of running a local
+  binary.
 
-- Board and viewer open in separate browser windows.
-- Another device on the same LAN can reach the app by host IP and port.
+The shared browser core remains the product boundary. Transport code should not
+own drawing semantics.
 
-## Phase 03: Drawing Surface
+## Current Product Scope
 
-Purpose: make the board usable as a simple drawing surface.
+Board presenter tools:
 
-Expected deliverables:
+- Board surface.
+- Compatible pen type.
+- Eraser.
+- Clear all.
+- Pointer.
+- Ephemeral write.
 
-- Canvas drawing surface
-- Pen input and mouse input
-- Board surfaces: whiteboard, blackboard, greenboard, blueboard
-- Compatible tools: markers for white/blue boards, chalk for black/green boards
-- Basic stroke width
-- Clear board action
+Viewer behavior:
 
-Success check:
+- Shows board background, strokes, eraser effects, explicit pointer, and
+  unexpired ephemeral strokes.
+- Never shows presenter controls.
 
-- Drawing works from a touch device.
-- The page does not scroll while drawing.
-- Viewer shows the selected board surface and content, not presenter controls.
+## Release Build Phase
 
-## Phase 04: Live Viewer Sync
+Purpose: produce simple cross-platform binaries for the local Approach 1 app.
 
-Purpose: mirror board drawing to the viewer.
+Delivered by Packet P16:
 
-Expected deliverables:
-
-- WebSocket connection
-- Stroke event protocol
-- In-memory board state
-- Viewer replay of current state on connect
-
-Success check:
-
-- Drawing on the board appears in the viewer with low latency.
-- Reloading the viewer restores current board contents.
-
-## Phase 05: Presenter Tools
-
-Purpose: add only the controls needed for real teaching use.
-
-Expected deliverables:
-
-- Explicit pointer mode
-- Undo
-- Eraser
-- Clear all
-- Ephemeral write mode with automatic expiration
-- Minimal visual polish
-- Basic connection status
+- `scripts/build-release.sh`
+- `tests/build-release-test.sh`
+- Linux amd64 build.
+- Windows amd64 build.
+- macOS amd64 build.
+- macOS arm64 build.
 
 Success check:
 
-- Presenter can draw, erase, point, write temporarily, undo, and clear without exposing controls to the viewer.
+```bash
+bash tests/build-release-test.sh
+scripts/build-release.sh
+```
 
-## Phase 06: Hardening
+## Future Hardening
 
-Purpose: make the app dependable for repeated local use.
+Keep future work small and testable.
 
-Expected deliverables:
+Likely next areas:
 
-- Mobile layout fixes
-- Reconnect behavior
-- Basic automated tests
-- Manual test checklist
-- Packaging/start command cleanup
+- LAN startup polish: clearer host/IP output, optional fixed default port, QR
+  links for Board and Viewer.
+- Reconnect behavior for relay and WebRTC transports.
+- WebRTC hosted deployment notes, HTTPS requirements, and failure states.
+- Manual browser smoke coverage for the WebRTC pairing path.
+- Canvas resize and device-pixel-ratio checks across common devices.
+- Packaging notes for unsigned Windows and macOS binaries.
+- Optional signing/notarization only if public distribution needs it.
+- Persistence only if repeated real use proves it is needed.
 
-Success check:
+Deferred:
 
-- A fresh user can start the app and use it from two local devices using the README.
+- Accounts.
+- Cloud dependency for the local binary workflow.
+- Persistent multi-board history.
+- Complex permissions.
+- Multi-presenter collaboration.
+- Rich design-tool features.

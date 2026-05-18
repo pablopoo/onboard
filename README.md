@@ -1,46 +1,93 @@
 # Onboard
 
-Onboard is a compact local-network web app for using one browser as a drawing board and another browser as a clean shared viewer.
+Onboard is a compact web app for live board sharing. Run it locally, open the
+Board on the drawing device, open the Viewer in the browser tab you share, and
+draw without exposing presenter controls.
 
-The intended workflow:
+## Current App
 
-1. Start the app on a computer in the local network.
-2. Open the board URL on a tablet, phone, or laptop.
-3. Open the viewer URL in another browser window or device.
-4. Share the viewer tab in Google Meet.
-5. Draw from the board device while viewers see only the drawing output.
+Onboard currently ships as a Go server with embedded vanilla JavaScript pages.
 
-## Goals
+- `/board` is the presenter surface with controls.
+- `/viewer` is the content-only surface for screen sharing.
+- `/` links to the local relay surfaces and the WebRTC pairing surfaces.
+- `/ws/relay` is the local WebSocket sync path.
+- `/signal` is the WebRTC signaling path.
 
-- Minimal setup.
-- Local network first.
-- Clean separation between drawing controls and shared output.
-- Low-latency drawing sync.
-- Small codebase that is easy to inspect and change.
+The end-user local binary uses Approach 1: a Go local WebSocket relay. The
+no-install hosted pairing path uses Approach 3: Go hosted signaling plus a
+WebRTC DataChannel between browsers.
 
-## Non-Goals For The First Version
+## Presenter And Viewer
 
-- User accounts.
-- Cloud hosting.
-- Persistent multi-board history.
-- Complex permissions.
-- Collaborative editing by many writers.
-- Rich design-tool features.
+Presenter tools on the Board include:
+
+- Board surface: whiteboard, blueboard, blackboard, or greenboard.
+- Compatible pen type: marker for whiteboard/blueboard, chalk for
+  blackboard/greenboard.
+- Eraser.
+- Clear all.
+- Pointer.
+- Ephemeral write.
+
+The Viewer shows only board content: board background, strokes, eraser effects,
+the explicit pointer when active, and unexpired ephemeral strokes. It never shows
+presenter controls.
+
+## Run From Source
+
+Development uses the Go toolchain at `/usr/local/go/bin/go`.
+
+```bash
+/usr/local/go/bin/go run ./cmd/onboard
+```
+
+To make the app reachable from other devices on the same local network, bind it
+to a LAN-facing address and open the printed paths from the other browser:
+
+```bash
+ONBOARD_ADDR=0.0.0.0:8080 /usr/local/go/bin/go run ./cmd/onboard
+```
+
+Then use:
+
+- `http://<your-computer-ip>:8080/board` for the drawing device.
+- `http://<your-computer-ip>:8080/viewer` for the shared browser tab.
+
+## Build Release Binaries
+
+```bash
+scripts/build-release.sh
+```
+
+The release script writes:
+
+- `dist/onboard-linux-amd64`
+- `dist/onboard-windows-amd64.exe`
+- `dist/onboard-macos-amd64`
+- `dist/onboard-macos-arm64`
+
+## Test
+
+```bash
+bash tests/build-release-test.sh
+GOCACHE=/tmp/onboard-go-build-cache /usr/local/go/bin/go test ./...
+npm run test:js
+git diff --check
+```
 
 ## Project Structure
 
 ```text
-AGENTS.md                    Project instructions for Codex and agentic work
-README.md                    Human-facing project overview
-docs/project-objective.md    Product goal and constraints
-docs/roadmap.md              Phase-by-phase plan
-docs/architecture.md         Initial architecture direction
-.codex/agents/               Role prompts for focused Codex work
-.codex/tasks/                Phase task notes
-.agents/README.md            Notes for local agent/plugin workspace
+cmd/onboard/        Go executable entrypoint
+internal/server/    HTTP routes, embedded static serving, relay and signaling wiring
+internal/hub/       Approach 1 local WebSocket relay state and broadcast
+internal/signaling/ Approach 3 pairing and WebRTC signaling registry
+web/core/           Shared browser product logic
+web/board/          Board presenter controller
+web/viewer/         Viewer content-only controller
+web/transports/     WebSocket relay and WebRTC DataChannel transport adapters
+scripts/            Local development and release tooling
+tests/              Shell checks and smoke checks
+docs/               Architecture, roadmap, and approach notes
 ```
-
-## Current Status
-
-Phase 01 foundation is being established. App code starts in a later phase.
-
