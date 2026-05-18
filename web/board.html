@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Onboard Board</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body class="drawing-page">
+    <main id="board-app" class="board-shell">
+      <section class="toolbar" aria-label="Presenter controls">
+        <label>
+          Surface
+          <select name="surface">
+            <option>Whiteboard</option>
+            <option>Blueboard</option>
+            <option>Blackboard</option>
+            <option>Greenboard</option>
+          </select>
+        </label>
+        <button type="button">Pen</button>
+        <button type="button">Eraser</button>
+        <button type="button">Pointer</button>
+        <button type="button">Ephemeral</button>
+        <button type="button">Clear</button>
+      </section>
+      <canvas id="board-canvas" class="board-canvas"></canvas>
+    </main>
+  </body>
+</html>
