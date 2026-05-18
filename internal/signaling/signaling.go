@@ -113,6 +113,44 @@ func (r *Registry) JoinSession(sessionID string, viewerPeerID string) (Session, 
 	return session.snapshot(), nil
 }
 
+func (r *Registry) ReleasePeer(sessionID string, peerID string) error {
+	r.mu.Lock()
+	session, ok := r.sessions[sessionID]
+	if !ok {
+		r.mu.Unlock()
+		return ErrUnknownSession
+	}
+
+	var closing []*subscription
+	switch {
+	case session.board.ID == peerID:
+		for _, subscriptions := range session.subscribers {
+			for subscriber := range subscriptions {
+				closing = append(closing, subscriber)
+			}
+		}
+		delete(r.sessions, sessionID)
+
+	case session.viewer.ID == peerID:
+		for subscriber := range session.subscribers[peerID] {
+			closing = append(closing, subscriber)
+		}
+		delete(session.subscribers, peerID)
+		session.viewer = Peer{Role: RoleViewer}
+
+	default:
+		r.mu.Unlock()
+		return ErrUnknownPeer
+	}
+	r.mu.Unlock()
+
+	for _, subscriber := range closing {
+		subscriber.close()
+	}
+
+	return nil
+}
+
 func (r *Registry) Subscribe(sessionID string, peerID string) (<-chan Signal, func(), error) {
 	subscriber := &subscription{
 		signals: make(chan Signal, subscriberBufferSize),

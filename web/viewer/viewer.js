@@ -147,7 +147,12 @@ export function createViewerController({
 
   function updateStatus(message) {
     if (elements.status) {
-      elements.status.textContent = message;
+      if (elements.status.dataset) {
+        elements.status.dataset.viewerConnection = message;
+      }
+      elements.status.setAttribute?.("data-viewer-connection", message);
+      elements.status.hidden = message === "Connected";
+      elements.status.textContent = message === "Connected" ? "" : message;
     }
   }
 

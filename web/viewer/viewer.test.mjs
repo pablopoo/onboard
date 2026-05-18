@@ -9,7 +9,13 @@ async function loadViewerModule() {
 function createFakeElement(properties = {}) {
   return {
     textContent: "",
+    hidden: false,
+    dataset: {},
     ...properties,
+    setAttribute(name, value) {
+      this.attributes ??= new Map();
+      this.attributes.set(name, String(value));
+    },
     querySelector(selector) {
       return this.children?.get(selector) ?? null;
     },
@@ -304,6 +310,12 @@ function latestRender(renders) {
   return renders.at(-1);
 }
 
+function assertViewerStatus(element, message) {
+  assert.equal(element.dataset.viewerConnection, message);
+  assert.equal(element.hidden, message === "Connected");
+  assert.equal(element.textContent, message === "Connected" ? "" : message);
+}
+
 async function flushAsyncWork() {
   for (let i = 0; i < 5; i += 1) {
     await Promise.resolve();
@@ -362,7 +374,7 @@ test("viewer app defaults to relay transport", async () => {
   assert.equal(relayCalls[0].url, "ws://local.test:8080/ws/relay");
   assert.equal(relayTransport.connectCalls, 1);
   assert.deepEqual(signalingCalls, []);
-  assert.equal(root.querySelector("[data-viewer-status]").textContent, "Connected");
+  assertViewerStatus(root.querySelector("[data-viewer-status]"), "Connected");
 
   controller.close();
 });
@@ -480,7 +492,7 @@ test("webrtc viewer joins session, sends setup ready signal, and connects data c
   assert.equal(webRTCCalls[0].peerId, "viewer-peer");
   assert.equal(webRTCCalls[0].RTCPeerConnectionImpl, FakeRTCPeerConnection);
   assert.equal(webRTCTransport.connectCalls, 1);
-  assert.equal(root.querySelector("[data-viewer-status]").textContent, "Connected");
+  assertViewerStatus(root.querySelector("[data-viewer-status]"), "Connected");
   assert.deepEqual(errors, []);
 
   controller.close();
@@ -509,7 +521,10 @@ test("webrtc viewer fails clearly without a sessionId URL parameter", async () =
   });
   await flushAsyncWork();
 
-  assert.equal(root.querySelector("[data-viewer-status]").textContent, "Connection failed");
+  assertViewerStatus(
+    root.querySelector("[data-viewer-status]"),
+    "Connection failed",
+  );
   assert.equal(signalingCalls.length, 0);
   assert.match(errors[0].message, /sessionId/i);
 
@@ -522,7 +537,7 @@ test("viewer controller connects transport", async () => {
   await controller.connect();
 
   assert.equal(transport.connectCalls, 1);
-  assert.equal(elements.status.textContent, "Connected");
+  assertViewerStatus(elements.status, "Connected");
 });
 
 test("incoming board:set-surface updates state and render snapshot", async () => {
@@ -673,13 +688,13 @@ test("close during pending connect keeps the viewer disconnected after stale res
   const { controller, elements } = await createFixture({ transport });
 
   const connection = controller.connect();
-  assert.equal(elements.status.textContent, "Connecting");
+  assertViewerStatus(elements.status, "Connecting");
 
   controller.close();
   transport.resolveConnect();
   await assert.rejects(connection, /viewer controller is closed/);
 
-  assert.equal(elements.status.textContent, "Disconnected");
+  assertViewerStatus(elements.status, "Disconnected");
 });
 
 test("connect after close rejects without reconnecting an unsubscribed controller", async () => {
@@ -692,7 +707,7 @@ test("connect after close rejects without reconnecting an unsubscribed controlle
   );
 
   assert.equal(transport.connectCalls, 0);
-  assert.equal(elements.status.textContent, "Disconnected");
+  assertViewerStatus(elements.status, "Disconnected");
 });
 
 test("viewer HTML has no board controls or toolbar controls", async () => {

@@ -26,7 +26,8 @@ The check verifies:
 - `/board` has a visible canvas, presenter toolbar, and the expected presenter controls.
 - `/viewer` loads without browser console or page errors.
 - `/viewer` has a visible canvas and no board controls, buttons, selects, inputs, or toolbar markup.
-- `/viewer` reports `Connected` through `[data-viewer-status]` within the timeout.
+- `/viewer` reports `Connected` through hidden status metadata within the timeout.
+- `/viewer` shows no persistent non-board status text after connecting.
 
 The script cleans up the Playwright session and the Go server on exit.
 
@@ -42,4 +43,4 @@ Manual fallback, if browser automation is unavailable:
 
 1. Build and start the app with the commands above.
 2. Open the printed Board URL and confirm the canvas and presenter controls are visible with no DevTools console errors.
-3. Open the printed Viewer URL and confirm it shows only viewer output markup, with no buttons, selects, inputs, or toolbar, reports `Connected`, and has no DevTools console errors.
+3. Open the printed Viewer URL and confirm it shows only viewer output markup, with no buttons, selects, inputs, toolbar, or persistent status overlay after connecting, and has no DevTools console errors.

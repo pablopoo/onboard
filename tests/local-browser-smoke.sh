@@ -211,7 +211,8 @@ await checkWithoutConsoleErrors("Viewer", async () => {
   await page.waitForSelector("canvas", { timeout: 5000 });
   await page.waitForFunction(
     () => {
-      const status = document.querySelector("[data-viewer-status]")?.textContent?.trim();
+      const status = document.querySelector("[data-viewer-status]")?.dataset
+        ?.viewerConnection;
       return status === "Connected";
     },
     { timeout: 5000 },
@@ -241,7 +242,13 @@ await checkWithoutConsoleErrors("Viewer", async () => {
       canvasWidth: rect?.width ?? 0,
       canvasHeight: rect?.height ?? 0,
       forbidden,
-      status: document.querySelector("[data-viewer-status]")?.textContent?.trim() ?? "",
+      status:
+        document.querySelector("[data-viewer-status]")?.dataset
+          ?.viewerConnection ?? "",
+      visibleStatus:
+        document.querySelector("[data-viewer-status]")?.hidden === false
+          ? document.querySelector("[data-viewer-status]")?.textContent?.trim() ?? ""
+          : "",
     };
   });
 
@@ -262,6 +269,9 @@ await checkWithoutConsoleErrors("Viewer", async () => {
   }
   if (result.status !== "Connected") {
     throw new Error(`Viewer did not connect to the local relay. Status: ${result.status}`);
+  }
+  if (result.visibleStatus !== "") {
+    throw new Error(`Viewer shows non-board status text: ${result.visibleStatus}`);
   }
 });
 

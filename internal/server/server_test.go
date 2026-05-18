@@ -310,6 +310,101 @@ func TestSignalCreateJoinAndSignalMessagesUseRegistry(t *testing.T) {
 	})
 }
 
+func TestSignalViewerDisconnectAllowsReplacementViewer(t *testing.T) {
+	t.Parallel()
+
+	testServer := httptest.NewServer(server.New(server.Config{Mode: "local"}))
+	t.Cleanup(testServer.Close)
+
+	board := dialSignal(t, testServer)
+	defer closeWebSocket(t, board)
+	viewer := dialSignal(t, testServer)
+
+	writeSignalJSON(t, board, signalTestMessage{
+		Type:   "session:create",
+		PeerID: "board-1",
+	})
+	created := readSignalMessage(t, board)
+	if created.Type != "session:created" {
+		t.Fatalf("created type = %q, want session:created: %#v", created.Type, created)
+	}
+
+	writeSignalJSON(t, viewer, signalTestMessage{
+		Type:      "session:join",
+		SessionID: created.SessionID,
+		PeerID:    "viewer-1",
+	})
+	assertSignalMessage(t, readSignalMessage(t, viewer), signalTestMessage{
+		Type:      "session:joined",
+		SessionID: created.SessionID,
+		PeerID:    "viewer-1",
+		Role:      "viewer",
+	})
+	closeWebSocket(t, viewer)
+
+	replacement := dialSignal(t, testServer)
+	defer closeWebSocket(t, replacement)
+	deadline := time.Now().Add(time.Second)
+	for {
+		writeSignalJSON(t, replacement, signalTestMessage{
+			Type:      "session:join",
+			SessionID: created.SessionID,
+			PeerID:    "viewer-2",
+		})
+		message := readSignalMessage(t, replacement)
+		if message.Type == "session:joined" {
+			assertSignalMessage(t, message, signalTestMessage{
+				Type:      "session:joined",
+				SessionID: created.SessionID,
+				PeerID:    "viewer-2",
+				Role:      "viewer",
+			})
+			return
+		}
+		if message.Type != "error" || message.Error != "peer already joined" || time.Now().After(deadline) {
+			t.Fatalf("replacement join message = %#v, want eventual session:joined", message)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestSignalBoardDisconnectDeletesSessionForJoin(t *testing.T) {
+	t.Parallel()
+
+	testServer := httptest.NewServer(server.New(server.Config{Mode: "local"}))
+	t.Cleanup(testServer.Close)
+
+	board := dialSignal(t, testServer)
+	writeSignalJSON(t, board, signalTestMessage{
+		Type:   "session:create",
+		PeerID: "board-1",
+	})
+	created := readSignalMessage(t, board)
+	if created.Type != "session:created" {
+		t.Fatalf("created type = %q, want session:created: %#v", created.Type, created)
+	}
+	closeWebSocket(t, board)
+
+	viewer := dialSignal(t, testServer)
+	defer closeWebSocket(t, viewer)
+	deadline := time.Now().Add(time.Second)
+	for {
+		writeSignalJSON(t, viewer, signalTestMessage{
+			Type:      "session:join",
+			SessionID: created.SessionID,
+			PeerID:    "viewer-1",
+		})
+		message := readSignalMessage(t, viewer)
+		if message.Type == "error" && message.Error == "unknown session" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("join after board disconnect = %#v, want unknown session", message)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestSignalReportsUnknownSessionAndKeepsSocketUsable(t *testing.T) {
 	t.Parallel()
 

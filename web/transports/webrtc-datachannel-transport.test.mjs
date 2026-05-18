@@ -192,6 +192,7 @@ function makeFakeSignaling(options = {}) {
 
   return {
     sent: [],
+    closed: false,
 
     sendSignal(message) {
       const error = options.sendSignalErrors?.shift();
@@ -218,6 +219,10 @@ function makeFakeSignaling(options = {}) {
 
     get handlerCount() {
       return handlers.size;
+    },
+
+    close() {
+      this.closed = true;
     },
   };
 }
@@ -1014,6 +1019,33 @@ test("sendSignal failure while emitting local ice rejects and cleans up", async 
   assert.equal(peer.closed, true);
   assert.equal(peer.channels[0].closed, true);
   assert.equal(signaling.handlerCount, 0);
+});
+
+test("data channel close after open cleans up peer connection and signaling", async () => {
+  const setup = makeTransport({ role: "board" });
+
+  const { pc, channel } = await connectBoardAndOpen(setup);
+  assert.equal(setup.signaling.handlerCount, 1);
+
+  channel.dispatchClose();
+
+  assert.equal(pc.closed, true);
+  assert.equal(setup.signaling.handlerCount, 0);
+  assert.equal(setup.signaling.closed, true);
+});
+
+test("peer connection failure after open closes channel and signaling", async () => {
+  const setup = makeTransport({ role: "board" });
+
+  const { pc, channel } = await connectBoardAndOpen(setup);
+  assert.equal(setup.signaling.handlerCount, 1);
+
+  pc.dispatchConnectionState("failed");
+
+  assert.equal(pc.closed, true);
+  assert.equal(channel.closed, true);
+  assert.equal(setup.signaling.handlerCount, 0);
+  assert.equal(setup.signaling.closed, true);
 });
 
 test("close closes peer connection and channel", async () => {

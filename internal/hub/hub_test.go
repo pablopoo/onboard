@@ -105,6 +105,50 @@ func TestRecordClearResetsReplayBaseline(t *testing.T) {
 	}
 }
 
+func TestRecordClearPreservesLatestSurfaceBaseline(t *testing.T) {
+	t.Parallel()
+
+	relay := hub.New()
+	whiteboard := hub.Event{
+		ID:      "evt-1",
+		Type:    "board:set-surface",
+		BoardID: "board-1",
+		At:      100,
+		Payload: map[string]any{"surface": "whiteboard"},
+	}
+	greenboard := hub.Event{
+		ID:      "evt-3",
+		Type:    "board:set-surface",
+		BoardID: "board-1",
+		At:      300,
+		Payload: map[string]any{"surface": "greenboard"},
+	}
+	clear := hub.Event{
+		ID:      "evt-5",
+		Type:    "board:clear",
+		BoardID: "board-1",
+		At:      500,
+		Payload: map[string]any{},
+	}
+
+	relay.Record(whiteboard)
+	relay.Record(testEvent("evt-2", "stroke:start"))
+	relay.Record(greenboard)
+	relay.Record(testEvent("evt-4", "stroke:end"))
+	relay.Record(clear)
+
+	snapshot := relay.Snapshot()
+	if len(snapshot) != 2 {
+		t.Fatalf("snapshot length = %d, want 2", len(snapshot))
+	}
+	if !reflect.DeepEqual(snapshot[0], greenboard) {
+		t.Fatalf("snapshot[0] = %#v, want latest surface %#v", snapshot[0], greenboard)
+	}
+	if !reflect.DeepEqual(snapshot[1], clear) {
+		t.Fatalf("snapshot[1] = %#v, want clear %#v", snapshot[1], clear)
+	}
+}
+
 func TestSubscribeReceivesEventsRecordedAfterSubscription(t *testing.T) {
 	t.Parallel()
 

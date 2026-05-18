@@ -65,13 +65,19 @@ export function createWebRTCDataChannelTransport({
   function handleDataChannelClose() {
     if (!connectResolved) {
       closeWithPendingError(new Error("DataChannel closed before open"));
+      return;
     }
+
+    closeResources();
   }
 
   function handleDataChannelError() {
     if (!connectResolved) {
       closeWithPendingError(new Error("DataChannel failed before open"));
+      return;
     }
+
+    closeResources();
   }
 
   function handleIceCandidate(message, currentPeerConnection) {
@@ -288,32 +294,48 @@ export function createWebRTCDataChannelTransport({
   }
 
   function handlePeerConnectionStateChange() {
-    if (connectResolved || !peerConnection) {
+    if (!peerConnection) {
       return;
     }
 
     if (peerConnection.connectionState === "failed") {
-      closeWithPendingError(new Error("PeerConnection failed before open"));
+      if (!connectResolved) {
+        closeWithPendingError(new Error("PeerConnection failed before open"));
+      } else {
+        closeResources();
+      }
       return;
     }
 
     if (peerConnection.connectionState === "closed") {
-      closeWithPendingError(new Error("PeerConnection closed before open"));
+      if (!connectResolved) {
+        closeWithPendingError(new Error("PeerConnection closed before open"));
+      } else {
+        closeResources();
+      }
     }
   }
 
   function handleIceConnectionStateChange() {
-    if (connectResolved || !peerConnection) {
+    if (!peerConnection) {
       return;
     }
 
     if (peerConnection.iceConnectionState === "failed") {
-      closeWithPendingError(new Error("PeerConnection failed before open"));
+      if (!connectResolved) {
+        closeWithPendingError(new Error("PeerConnection failed before open"));
+      } else {
+        closeResources();
+      }
       return;
     }
 
     if (peerConnection.iceConnectionState === "closed") {
-      closeWithPendingError(new Error("PeerConnection closed before open"));
+      if (!connectResolved) {
+        closeWithPendingError(new Error("PeerConnection closed before open"));
+      } else {
+        closeResources();
+      }
     }
   }
 
@@ -379,6 +401,7 @@ export function createWebRTCDataChannelTransport({
 
     unsubscribeSignals?.();
     unsubscribeSignals = null;
+    signaling.close?.();
 
     const channel = dataChannel;
     dataChannel = null;

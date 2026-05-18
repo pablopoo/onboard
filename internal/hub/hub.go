@@ -35,7 +35,7 @@ func (h *Hub) Record(event Event) {
 	h.mu.Lock()
 
 	if stored.Type == "board:clear" {
-		h.events = []Event{cloneEvent(stored)}
+		h.events = replayBaselineAfterClear(h.events, stored)
 	} else {
 		h.events = append(h.events, cloneEvent(stored))
 	}
@@ -99,6 +99,16 @@ func (s *subscription) close() {
 	s.closeOnce.Do(func() {
 		close(s.events)
 	})
+}
+
+func replayBaselineAfterClear(events []Event, clear Event) []Event {
+	for index := len(events) - 1; index >= 0; index-- {
+		if events[index].Type == "board:set-surface" {
+			return []Event{cloneEvent(events[index]), cloneEvent(clear)}
+		}
+	}
+
+	return []Event{cloneEvent(clear)}
 }
 
 func cloneEvent(event Event) Event {

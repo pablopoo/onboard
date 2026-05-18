@@ -96,6 +96,47 @@ func TestJoinSessionRejectsDuplicateViewer(t *testing.T) {
 	}
 }
 
+func TestReleaseViewerAllowsAnotherViewerToJoin(t *testing.T) {
+	t.Parallel()
+
+	registry := signaling.NewRegistry()
+	created := registry.CreateSession("board-1")
+	if _, err := registry.JoinSession(created.ID, "viewer-1"); err != nil {
+		t.Fatalf("first JoinSession returned error: %v", err)
+	}
+
+	if err := registry.ReleasePeer(created.ID, "viewer-1"); err != nil {
+		t.Fatalf("ReleasePeer returned error: %v", err)
+	}
+
+	joined, err := registry.JoinSession(created.ID, "viewer-2")
+	if err != nil {
+		t.Fatalf("second JoinSession returned error: %v", err)
+	}
+	if joined.Viewer.ID != "viewer-2" {
+		t.Fatalf("joined viewer = %q, want viewer-2", joined.Viewer.ID)
+	}
+}
+
+func TestReleaseBoardDeletesSession(t *testing.T) {
+	t.Parallel()
+
+	registry := signaling.NewRegistry()
+	created := registry.CreateSession("board-1")
+	if _, err := registry.JoinSession(created.ID, "viewer-1"); err != nil {
+		t.Fatalf("JoinSession returned error: %v", err)
+	}
+
+	if err := registry.ReleasePeer(created.ID, "board-1"); err != nil {
+		t.Fatalf("ReleasePeer returned error: %v", err)
+	}
+
+	_, err := registry.JoinSession(created.ID, "viewer-2")
+	if !errors.Is(err, signaling.ErrUnknownSession) {
+		t.Fatalf("JoinSession after board release error = %v, want ErrUnknownSession", err)
+	}
+}
+
 func TestSubscribeReturnsMessagesForOnePeerOnly(t *testing.T) {
 	t.Parallel()
 

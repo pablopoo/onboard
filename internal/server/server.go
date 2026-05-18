@@ -153,6 +153,8 @@ func signalEndpoint(registry *signaling.Registry, peers *signalPeerIndex) http.H
 		var writeMu sync.Mutex
 		var unsubscribe func()
 		var forwardDone <-chan struct{}
+		var activeSessionID string
+		var activePeerID string
 
 		stopForwarding := func() {
 			if unsubscribe != nil {
@@ -164,10 +166,24 @@ func signalEndpoint(registry *signaling.Registry, peers *signalPeerIndex) http.H
 				forwardDone = nil
 			}
 		}
-		defer stopForwarding()
+		releaseActivePeer := func() {
+			if activeSessionID == "" || activePeerID == "" {
+				return
+			}
+			if err := registry.ReleasePeer(activeSessionID, activePeerID); err == nil {
+				peers.ReleasePeer(activeSessionID, activePeerID)
+			}
+			activeSessionID = ""
+			activePeerID = ""
+		}
+		defer func() {
+			stopForwarding()
+			releaseActivePeer()
+		}()
 
 		startForwarding := func(sessionID string, peerID string) error {
 			stopForwarding()
+			releaseActivePeer()
 
 			signals, unsubscribeNext, err := registry.Subscribe(sessionID, peerID)
 			if err != nil {
@@ -177,6 +193,8 @@ func signalEndpoint(registry *signaling.Registry, peers *signalPeerIndex) http.H
 			done := make(chan struct{})
 			unsubscribe = unsubscribeNext
 			forwardDone = done
+			activeSessionID = sessionID
+			activePeerID = peerID
 			go func() {
 				defer close(done)
 				for signal := range signals {
@@ -306,6 +324,7 @@ func signalEndpoint(registry *signaling.Registry, peers *signalPeerIndex) http.H
 		}
 
 		stopForwarding()
+		releaseActivePeer()
 		_ = conn.Close(websocket.StatusNormalClosure, "")
 	}
 }
@@ -521,6 +540,23 @@ func (p *signalPeerIndex) Record(session signaling.Session) {
 	p.sessions[session.ID] = signalSessionPeers{
 		BoardID:  session.Board.ID,
 		ViewerID: session.Viewer.ID,
+	}
+}
+
+func (p *signalPeerIndex) ReleasePeer(sessionID string, peerID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	session, ok := p.sessions[sessionID]
+	if !ok {
+		return
+	}
+	switch peerID {
+	case session.BoardID:
+		delete(p.sessions, sessionID)
+	case session.ViewerID:
+		session.ViewerID = ""
+		p.sessions[sessionID] = session
 	}
 }
 
