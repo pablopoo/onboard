@@ -16,6 +16,14 @@ function createFakeElement(properties = {}) {
   };
 }
 
+function createFakeDocument(root, selector = "#viewer-app") {
+  return {
+    querySelector(requestedSelector) {
+      return requestedSelector === selector ? root : null;
+    },
+  };
+}
+
 function createFakeCanvas(rect = { left: 0, top: 0, width: 320, height: 180 }) {
   return createFakeElement({
     width: rect.width,
@@ -25,9 +33,24 @@ function createFakeCanvas(rect = { left: 0, top: 0, width: 320, height: 180 }) {
     },
     getContext(type) {
       assert.equal(type, "2d");
-      return {};
+      return createFakeCanvasContext();
     },
   });
+}
+
+function createFakeCanvasContext() {
+  return {
+    clearRect() {},
+    save() {},
+    restore() {},
+    fillRect() {},
+    beginPath() {},
+    arc() {},
+    fill() {},
+    moveTo() {},
+    lineTo() {},
+    stroke() {},
+  };
 }
 
 function createDeferred() {
@@ -78,6 +101,61 @@ function createFakeTransport(options = {}) {
     emit(event) {
       for (const handler of handlers) {
         handler(event);
+      }
+    },
+    close() {
+      this.closed = true;
+    },
+  };
+}
+
+function createFakeSignalingClient(options = {}) {
+  const handlers = new Set();
+  const connection = createDeferred();
+
+  return {
+    connected: false,
+    closed: false,
+    connectCalls: 0,
+    createdSessions: [],
+    joinedSessions: [],
+    sentSignals: [],
+    connect() {
+      this.connectCalls += 1;
+      if (options.deferConnect) {
+        return connection.promise.then(() => {
+          this.connected = true;
+        });
+      }
+
+      if (options.rejectConnect) {
+        return Promise.reject(new Error("signaling connect failed"));
+      }
+
+      this.connected = true;
+      return Promise.resolve();
+    },
+    resolveConnect() {
+      connection.resolve();
+    },
+    createSession(peerId) {
+      this.createdSessions.push(peerId);
+    },
+    joinSession(sessionId, peerId) {
+      this.joinedSessions.push({ sessionId, peerId });
+    },
+    sendSignal(message) {
+      this.sentSignals.push(message);
+    },
+    onMessage(handler) {
+      handlers.add(handler);
+      return () => {
+        handlers.delete(handler);
+      };
+    },
+    emit(message) {
+      for (const handler of handlers) {
+        handler(message);
       }
     },
     close() {
@@ -168,6 +246,15 @@ function createFixture(options = {}) {
   });
 }
 
+function createViewerAppRoot() {
+  const children = new Map([
+    ["[data-viewer-canvas]", createFakeCanvas()],
+    ["[data-viewer-status]", createFakeElement()],
+  ]);
+
+  return createFakeElement({ children });
+}
+
 function createResizeFixture(options = {}) {
   const rect = { left: 0, top: 0, width: 320, height: 180 };
   const resizeCanvasToDisplaySize = (canvas) => {
@@ -217,6 +304,12 @@ function latestRender(renders) {
   return renders.at(-1);
 }
 
+async function flushAsyncWork() {
+  for (let i = 0; i < 5; i += 1) {
+    await Promise.resolve();
+  }
+}
+
 test("createRelayURL maps http and https locations to /ws/relay", async () => {
   const { createRelayURL } = await loadViewerModule();
 
@@ -228,6 +321,199 @@ test("createRelayURL maps http and https locations to /ws/relay", async () => {
     createRelayURL({ protocol: "https:", host: "board.test" }),
     "wss://board.test/ws/relay",
   );
+});
+
+test("createSignalURL maps http and https locations to /signal", async () => {
+  const { createSignalURL } = await loadViewerModule();
+
+  assert.equal(
+    createSignalURL({ protocol: "http:", host: "local.test:8080" }),
+    "ws://local.test:8080/signal",
+  );
+  assert.equal(
+    createSignalURL({ protocol: "https:", host: "board.test" }),
+    "wss://board.test/signal",
+  );
+});
+
+test("viewer app defaults to relay transport", async () => {
+  const { createViewerApp } = await loadViewerModule();
+  const root = createViewerAppRoot();
+  const relayTransport = createFakeTransport();
+  const relayCalls = [];
+  const signalingCalls = [];
+
+  const controller = createViewerApp({
+    document: createFakeDocument(root),
+    location: { protocol: "http:", host: "local.test:8080", search: "" },
+    WebSocketImpl: class FakeWebSocket {},
+    createRelayTransport(options) {
+      relayCalls.push(options);
+      return relayTransport;
+    },
+    createSignalingClientImpl(options) {
+      signalingCalls.push(options);
+      return createFakeSignalingClient();
+    },
+  });
+  await flushAsyncWork();
+
+  assert.equal(relayCalls.length, 1);
+  assert.equal(relayCalls[0].url, "ws://local.test:8080/ws/relay");
+  assert.equal(relayTransport.connectCalls, 1);
+  assert.deepEqual(signalingCalls, []);
+  assert.equal(root.querySelector("[data-viewer-status]").textContent, "Connected");
+
+  controller.close();
+});
+
+test("viewer app honors explicit relay transport mode", async () => {
+  const { createViewerApp } = await loadViewerModule();
+  const root = createViewerAppRoot();
+  const relayTransport = createFakeTransport();
+  const relayCalls = [];
+
+  const controller = createViewerApp({
+    document: createFakeDocument(root),
+    location: {
+      protocol: "https:",
+      host: "viewer.test",
+      search: "?transport=relay",
+    },
+    WebSocketImpl: class FakeWebSocket {},
+    createRelayTransport(options) {
+      relayCalls.push(options);
+      return relayTransport;
+    },
+    createSignalingClientImpl() {
+      throw new Error("signaling should not be used in relay mode");
+    },
+  });
+  await flushAsyncWork();
+
+  assert.equal(relayCalls.length, 1);
+  assert.equal(relayCalls[0].url, "wss://viewer.test/ws/relay");
+  assert.equal(relayTransport.connectCalls, 1);
+
+  controller.close();
+});
+
+test("webrtc viewer joins session, sends setup ready signal, and connects data channel", async () => {
+  const { createViewerApp } = await loadViewerModule();
+  const root = createViewerAppRoot();
+  const signaling = createFakeSignalingClient();
+  const webRTCTransport = createFakeTransport();
+  const signalingCalls = [];
+  const webRTCCalls = [];
+  const setupOrder = [];
+  const errors = [];
+  class FakeRTCPeerConnection {}
+  const sendSignal = signaling.sendSignal.bind(signaling);
+  signaling.sendSignal = (message) => {
+    setupOrder.push("ready-signal");
+    sendSignal(message);
+  };
+
+  const controller = createViewerApp({
+    document: createFakeDocument(root),
+    location: {
+      protocol: "https:",
+      host: "viewer.test",
+      search: "?transport=webrtc&sessionId=session-42",
+    },
+    WebSocketImpl: class FakeWebSocket {},
+    RTCPeerConnectionImpl: FakeRTCPeerConnection,
+    createPeerId: () => "viewer-peer",
+    createRelayTransport() {
+      throw new Error("relay should not be used in webrtc mode");
+    },
+    createSignalingClientImpl(options) {
+      signalingCalls.push(options);
+      return signaling;
+    },
+    createWebRTCTransport(options) {
+      webRTCCalls.push(options);
+      return {
+        ...webRTCTransport,
+        connect() {
+          setupOrder.push("webrtc-connect");
+          return webRTCTransport.connect();
+        },
+      };
+    },
+    reportError(error) {
+      errors.push(error);
+    },
+  });
+  await flushAsyncWork();
+
+  assert.equal(signalingCalls.length, 1);
+  assert.equal(signalingCalls[0].url, "wss://viewer.test/signal");
+  assert.equal(signaling.connectCalls, 1);
+  assert.deepEqual(signaling.joinedSessions, [
+    { sessionId: "session-42", peerId: "viewer-peer" },
+  ]);
+  assert.deepEqual(signaling.sentSignals, []);
+  assert.deepEqual(webRTCCalls, []);
+
+  signaling.emit({
+    type: "session:joined",
+    sessionId: "session-42",
+    peerId: "viewer-peer",
+    role: "viewer",
+  });
+  await flushAsyncWork();
+
+  assert.deepEqual(signaling.sentSignals, [
+    {
+      type: "ice",
+      sessionId: "session-42",
+      peerId: "viewer-peer",
+      payload: { onboardViewerReady: true },
+    },
+  ]);
+  assert.deepEqual(setupOrder, ["webrtc-connect", "ready-signal"]);
+  assert.equal(webRTCCalls.length, 1);
+  assert.equal(webRTCCalls[0].signaling, signaling);
+  assert.equal(webRTCCalls[0].role, "viewer");
+  assert.equal(webRTCCalls[0].sessionId, "session-42");
+  assert.equal(webRTCCalls[0].peerId, "viewer-peer");
+  assert.equal(webRTCCalls[0].RTCPeerConnectionImpl, FakeRTCPeerConnection);
+  assert.equal(webRTCTransport.connectCalls, 1);
+  assert.equal(root.querySelector("[data-viewer-status]").textContent, "Connected");
+  assert.deepEqual(errors, []);
+
+  controller.close();
+});
+
+test("webrtc viewer fails clearly without a sessionId URL parameter", async () => {
+  const { createViewerApp } = await loadViewerModule();
+  const root = createViewerAppRoot();
+  const errors = [];
+  const signalingCalls = [];
+
+  const controller = createViewerApp({
+    document: createFakeDocument(root),
+    location: {
+      protocol: "https:",
+      host: "viewer.test",
+      search: "?transport=webrtc",
+    },
+    createSignalingClientImpl(options) {
+      signalingCalls.push(options);
+      return createFakeSignalingClient();
+    },
+    reportError(error) {
+      errors.push(error);
+    },
+  });
+  await flushAsyncWork();
+
+  assert.equal(root.querySelector("[data-viewer-status]").textContent, "Connection failed");
+  assert.equal(signalingCalls.length, 0);
+  assert.match(errors[0].message, /sessionId/i);
+
+  controller.close();
 });
 
 test("viewer controller connects transport", async () => {

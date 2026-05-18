@@ -7,13 +7,28 @@ import {
   renderBoardState as defaultRenderBoardState,
   resizeCanvasToDisplaySize as defaultResizeCanvasToDisplaySize,
 } from "../core/canvas-renderer.js";
+import { createSignalingClient } from "../transports/signaling-client.js";
+import { createWebRTCDataChannelTransport } from "../transports/webrtc-datachannel-transport.js";
 import { createWebSocketRelayTransport } from "../transports/websocket-relay-transport.js";
+
+const VIEWER_READY_SIGNAL_PAYLOAD = { onboardViewerReady: true };
 
 export function createRelayURL(location) {
   const base = `${location.protocol}//${location.host}`;
   const url = new URL("/ws/relay", base);
   url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
   return url.href;
+}
+
+export function createSignalURL(location) {
+  const base = `${location.protocol}//${location.host}`;
+  const url = new URL("/signal", base);
+  url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  return url.href;
+}
+
+export function createPeerId(prefix = "peer") {
+  return `${prefix}-${createIdPart()}`;
 }
 
 export function createViewerController({
@@ -172,6 +187,11 @@ export function createViewerApp({
   document = globalThis.document,
   location = globalThis.location,
   WebSocketImpl = globalThis.WebSocket,
+  RTCPeerConnectionImpl = globalThis.RTCPeerConnection,
+  createRelayTransport = createWebSocketRelayTransport,
+  createSignalingClientImpl = createSignalingClient,
+  createWebRTCTransport = createWebRTCDataChannelTransport,
+  createPeerId: createPeerIdImpl = createPeerId,
   reportError = defaultReportError,
 } = {}) {
   const root = document?.querySelector?.("#viewer-app");
@@ -179,10 +199,22 @@ export function createViewerApp({
     return null;
   }
 
-  const transport = createWebSocketRelayTransport({
-    url: createRelayURL(location),
-    WebSocketImpl,
-  });
+  const mode = transportModeForLocation(location);
+  const transport =
+    mode === "webrtc"
+      ? createViewerWebRTCSetupTransport({
+          location,
+          WebSocketImpl,
+          RTCPeerConnectionImpl,
+          createSignalingClientImpl,
+          createWebRTCTransport,
+          sessionId: sessionIdForLocation(location),
+          peerId: createPeerIdImpl("viewer"),
+        })
+      : createRelayTransport({
+          url: createRelayURL(location),
+          WebSocketImpl,
+        });
   const controller = createViewerController({
     elements: {
       canvas: root.querySelector("[data-viewer-canvas]"),
@@ -198,8 +230,212 @@ export function createViewerApp({
   return controller;
 }
 
+function createViewerWebRTCSetupTransport({
+  location,
+  WebSocketImpl,
+  RTCPeerConnectionImpl,
+  createSignalingClientImpl,
+  createWebRTCTransport,
+  sessionId,
+  peerId,
+}) {
+  const handlers = new Set();
+  const realUnsubscribers = new Map();
+  const pendingRejects = new Set();
+  let signaling = null;
+  let realTransport = null;
+  let connectPromise = null;
+  let closed = false;
+
+  return {
+    connect() {
+      if (closed) {
+        return Promise.reject(new Error("WebRTC viewer transport is closed"));
+      }
+
+      if (!sessionId) {
+        return Promise.reject(
+          new Error("WebRTC viewer mode requires sessionId in the URL"),
+        );
+      }
+
+      if (connectPromise) {
+        return connectPromise;
+      }
+
+      connectPromise = connectWebRTC().catch((error) => {
+        connectPromise = null;
+        if (!closed) {
+          closeResources();
+        }
+        throw error;
+      });
+      return connectPromise;
+    },
+    send(event) {
+      if (!realTransport) {
+        throw new Error("WebRTC transport must be open before sending events");
+      }
+      realTransport.send(event);
+    },
+    onEvent(handler) {
+      handlers.add(handler);
+      attachHandler(handler);
+
+      return () => {
+        handlers.delete(handler);
+        const unsubscribe = realUnsubscribers.get(handler);
+        unsubscribe?.();
+        realUnsubscribers.delete(handler);
+      };
+    },
+    close() {
+      if (closed) {
+        return;
+      }
+
+      closed = true;
+      rejectPendingWaits(new Error("WebRTC viewer transport closed before open"));
+      closeResources();
+    },
+  };
+
+  async function connectWebRTC() {
+    signaling = createSignalingClientImpl({
+      url: createSignalURL(location),
+      WebSocketImpl,
+    });
+    await signaling.connect();
+    throwIfClosed();
+
+    const sessionJoined = waitForSignalingMessage((message) => {
+      return (
+        message.type === "session:joined" &&
+        message.sessionId === sessionId &&
+        message.peerId === peerId &&
+        message.role === "viewer"
+      );
+    });
+    signaling.joinSession(sessionId, peerId);
+    await sessionJoined;
+    throwIfClosed();
+
+    realTransport = createWebRTCTransport({
+      signaling,
+      role: "viewer",
+      sessionId,
+      peerId,
+      RTCPeerConnectionImpl,
+    });
+    attachHandlers();
+    const realConnection = realTransport.connect();
+    signaling.sendSignal({
+      type: "ice",
+      sessionId,
+      peerId,
+      payload: VIEWER_READY_SIGNAL_PAYLOAD,
+    });
+    await realConnection;
+  }
+
+  function waitForSignalingMessage(predicate) {
+    return new Promise((resolve, reject) => {
+      let unsubscribe = () => {};
+
+      function cleanup() {
+        unsubscribe();
+        pendingRejects.delete(rejectWithCleanup);
+      }
+
+      function rejectWithCleanup(error) {
+        cleanup();
+        reject(error);
+      }
+
+      pendingRejects.add(rejectWithCleanup);
+      unsubscribe = signaling.onMessage((message) => {
+        if (message.type === "error") {
+          rejectWithCleanup(
+            new Error(`WebRTC signaling error: ${message.error}`),
+          );
+          return;
+        }
+
+        if (predicate(message)) {
+          cleanup();
+          resolve(message);
+        }
+      });
+    });
+  }
+
+  function attachHandlers() {
+    for (const handler of handlers) {
+      attachHandler(handler);
+    }
+  }
+
+  function attachHandler(handler) {
+    if (!realTransport || realUnsubscribers.has(handler)) {
+      return;
+    }
+
+    realUnsubscribers.set(handler, realTransport.onEvent(handler));
+  }
+
+  function rejectPendingWaits(error) {
+    for (const rejectPending of Array.from(pendingRejects)) {
+      rejectPending(error);
+    }
+    pendingRejects.clear();
+  }
+
+  function closeResources() {
+    for (const unsubscribe of realUnsubscribers.values()) {
+      unsubscribe();
+    }
+    realUnsubscribers.clear();
+
+    realTransport?.close();
+    realTransport = null;
+
+    signaling?.close();
+    signaling = null;
+  }
+
+  function throwIfClosed() {
+    if (closed) {
+      throw new Error("WebRTC viewer transport is closed");
+    }
+  }
+}
+
+function transportModeForLocation(location) {
+  const searchParams = new URLSearchParams(location?.search ?? "");
+  return searchParams.get("transport") === "webrtc" ? "webrtc" : "relay";
+}
+
+function sessionIdForLocation(location) {
+  const searchParams = new URLSearchParams(location?.search ?? "");
+  return searchParams.get("sessionId")?.trim() ?? "";
+}
+
+function createIdPart() {
+  const crypto = globalThis.crypto;
+  const bytes = new Uint32Array(2);
+
+  if (typeof crypto?.getRandomValues === "function") {
+    crypto.getRandomValues(bytes);
+  } else {
+    bytes[0] = Math.floor(Math.random() * 0xffffffff);
+    bytes[1] = Date.now() & 0xffffffff;
+  }
+
+  return Array.from(bytes, (value) => value.toString(36)).join("");
+}
+
 function defaultReportError(error) {
-  console.error("Viewer relay transport error", error);
+  console.error("Viewer transport error", error);
 }
 
 if (

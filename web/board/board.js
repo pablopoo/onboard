@@ -12,6 +12,8 @@ import {
   renderBoardState as defaultRenderBoardState,
   resizeCanvasToDisplaySize as defaultResizeCanvasToDisplaySize,
 } from "../core/canvas-renderer.js";
+import { createSignalingClient } from "../transports/signaling-client.js";
+import { createWebRTCDataChannelTransport } from "../transports/webrtc-datachannel-transport.js";
 import { createWebSocketRelayTransport } from "../transports/websocket-relay-transport.js";
 
 const SURFACES = new Set([
@@ -46,6 +48,7 @@ const PEN_STYLES = {
 };
 const ERASER_STYLE = { color: "#000000", width: 18 };
 const EPHEMERAL_DELAY_MS = 4_000;
+const VIEWER_READY_SIGNAL_PAYLOAD = { onboardViewerReady: true };
 
 let nextStrokeNumber = 1;
 
@@ -54,6 +57,17 @@ export function createRelayURL(location) {
   const url = new URL("/ws/relay", base);
   url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
   return url.href;
+}
+
+export function createSignalURL(location) {
+  const base = `${location.protocol}//${location.host}`;
+  const url = new URL("/signal", base);
+  url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  return url.href;
+}
+
+export function createPeerId(prefix = "peer") {
+  return `${prefix}-${createEventSessionId()}`;
 }
 
 export function createBoardController({
@@ -385,16 +399,45 @@ export function createBoardApp({
   document = globalThis.document,
   location = globalThis.location,
   WebSocketImpl = globalThis.WebSocket,
+  RTCPeerConnectionImpl = globalThis.RTCPeerConnection,
+  createRelayTransport = createWebSocketRelayTransport,
+  createSignalingClientImpl = createSignalingClient,
+  createWebRTCTransport = createWebRTCDataChannelTransport,
+  createPeerId: createPeerIdImpl = createPeerId,
+  reportError = defaultReportError,
 } = {}) {
   const root = document?.querySelector?.("#board-app");
   if (!root) {
     return null;
   }
 
-  const transport = createWebSocketRelayTransport({
-    url: createRelayURL(location),
-    WebSocketImpl,
-  });
+  const sessionStatus = root.querySelector("[data-board-session]");
+  const mode = transportModeForLocation(location);
+  const transport =
+    mode === "webrtc"
+      ? createBoardWebRTCSetupTransport({
+          location,
+          WebSocketImpl,
+          RTCPeerConnectionImpl,
+          createSignalingClientImpl,
+          createWebRTCTransport,
+          peerId: createPeerIdImpl("board"),
+          reportSession(sessionId) {
+            updateBoardSessionStatus(sessionStatus, location, sessionId);
+          },
+          reportStatus(message) {
+            setText(sessionStatus, message);
+          },
+        })
+      : createRelayTransport({
+          url: createRelayURL(location),
+          WebSocketImpl,
+        });
+
+  if (mode === "relay") {
+    setText(sessionStatus, "Relay mode");
+  }
+
   const controller = createBoardController({
     elements: {
       canvas: root.querySelector("[data-board-canvas]"),
@@ -406,13 +449,200 @@ export function createBoardApp({
       clearButton: root.querySelector("[data-board-control='clear']"),
     },
     transport,
+    reportError,
   });
 
   controller.connect().catch((error) => {
-    console.error("Failed to connect board relay", error);
+    if (mode === "webrtc") {
+      setText(sessionStatus, "WebRTC connection failed");
+    }
+    reportError(error);
   });
 
   return controller;
+}
+
+function createBoardWebRTCSetupTransport({
+  location,
+  WebSocketImpl,
+  RTCPeerConnectionImpl,
+  createSignalingClientImpl,
+  createWebRTCTransport,
+  peerId,
+  reportSession,
+  reportStatus,
+}) {
+  const handlers = new Set();
+  const realUnsubscribers = new Map();
+  const pendingRejects = new Set();
+  let signaling = null;
+  let realTransport = null;
+  let connectPromise = null;
+  let sessionId = null;
+  let closed = false;
+
+  return {
+    connect() {
+      if (closed) {
+        return Promise.reject(new Error("WebRTC board transport is closed"));
+      }
+
+      if (connectPromise) {
+        return connectPromise;
+      }
+
+      connectPromise = connectWebRTC().catch((error) => {
+        connectPromise = null;
+        if (!closed) {
+          closeResources();
+        }
+        throw error;
+      });
+      return connectPromise;
+    },
+    send(event) {
+      if (!realTransport) {
+        throw new Error("WebRTC transport must be open before sending events");
+      }
+      realTransport.send(event);
+    },
+    onEvent(handler) {
+      handlers.add(handler);
+      attachHandler(handler);
+
+      return () => {
+        handlers.delete(handler);
+        const unsubscribe = realUnsubscribers.get(handler);
+        unsubscribe?.();
+        realUnsubscribers.delete(handler);
+      };
+    },
+    close() {
+      if (closed) {
+        return;
+      }
+
+      closed = true;
+      rejectPendingWaits(new Error("WebRTC board transport closed before open"));
+      closeResources();
+    },
+  };
+
+  async function connectWebRTC() {
+    reportStatus?.("Creating WebRTC session");
+    signaling = createSignalingClientImpl({
+      url: createSignalURL(location),
+      WebSocketImpl,
+    });
+    await signaling.connect();
+    throwIfClosed();
+
+    const sessionCreated = waitForSignalingMessage((message) => {
+      return (
+        message.type === "session:created" &&
+        message.peerId === peerId &&
+        message.role === "board"
+      );
+    });
+    signaling.createSession(peerId);
+    const createdMessage = await sessionCreated;
+    throwIfClosed();
+
+    sessionId = createdMessage.sessionId;
+    reportSession?.(sessionId);
+
+    await waitForSignalingMessage((message) => {
+      return (
+        message.type === "signal:ice" &&
+        message.sessionId === sessionId &&
+        message.peerId !== peerId &&
+        message.payload?.onboardViewerReady ===
+          VIEWER_READY_SIGNAL_PAYLOAD.onboardViewerReady
+      );
+    });
+    throwIfClosed();
+
+    realTransport = createWebRTCTransport({
+      signaling,
+      role: "board",
+      sessionId,
+      peerId,
+      RTCPeerConnectionImpl,
+    });
+    attachHandlers();
+    await realTransport.connect();
+  }
+
+  function waitForSignalingMessage(predicate) {
+    return new Promise((resolve, reject) => {
+      let unsubscribe = () => {};
+
+      function cleanup() {
+        unsubscribe();
+        pendingRejects.delete(rejectWithCleanup);
+      }
+
+      function rejectWithCleanup(error) {
+        cleanup();
+        reject(error);
+      }
+
+      pendingRejects.add(rejectWithCleanup);
+      unsubscribe = signaling.onMessage((message) => {
+        if (message.type === "error") {
+          rejectWithCleanup(
+            new Error(`WebRTC signaling error: ${message.error}`),
+          );
+          return;
+        }
+
+        if (predicate(message)) {
+          cleanup();
+          resolve(message);
+        }
+      });
+    });
+  }
+
+  function attachHandlers() {
+    for (const handler of handlers) {
+      attachHandler(handler);
+    }
+  }
+
+  function attachHandler(handler) {
+    if (!realTransport || realUnsubscribers.has(handler)) {
+      return;
+    }
+
+    realUnsubscribers.set(handler, realTransport.onEvent(handler));
+  }
+
+  function rejectPendingWaits(error) {
+    for (const rejectPending of Array.from(pendingRejects)) {
+      rejectPending(error);
+    }
+    pendingRejects.clear();
+  }
+
+  function closeResources() {
+    for (const unsubscribe of realUnsubscribers.values()) {
+      unsubscribe();
+    }
+    realUnsubscribers.clear();
+
+    realTransport?.close();
+    realTransport = null;
+
+    signaling?.close();
+    signaling = null;
+  }
+
+  function throwIfClosed() {
+    if (closed) {
+      throw new Error("WebRTC board transport is closed");
+    }
+  }
 }
 
 function surfaceName(value) {
@@ -437,8 +667,32 @@ function setPressed(element, pressed) {
   element?.setAttribute?.("aria-pressed", String(pressed));
 }
 
+function transportModeForLocation(location) {
+  const searchParams = new URLSearchParams(location?.search ?? "");
+  return searchParams.get("transport") === "webrtc" ? "webrtc" : "relay";
+}
+
+function updateBoardSessionStatus(element, location, sessionId) {
+  const viewerURL = createViewerWebRTCURL(location, sessionId);
+  setText(element, `WebRTC session ${sessionId}. Viewer: ${viewerURL}`);
+}
+
+function createViewerWebRTCURL(location, sessionId) {
+  const base = `${location.protocol}//${location.host}`;
+  const url = new URL("/viewer", base);
+  url.searchParams.set("transport", "webrtc");
+  url.searchParams.set("sessionId", sessionId);
+  return `${url.pathname}${url.search}`;
+}
+
+function setText(element, message) {
+  if (element) {
+    element.textContent = message;
+  }
+}
+
 function defaultReportError(error) {
-  console.error("Board relay transport error", error);
+  console.error("Board transport error", error);
 }
 
 function createEventSessionId() {

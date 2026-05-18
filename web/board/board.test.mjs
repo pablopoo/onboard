@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { createBoardController, createRelayURL } from "./board.js";
+import {
+  createBoardApp,
+  createBoardController,
+  createRelayURL,
+  createSignalURL,
+} from "./board.js";
 
 function createFakeElement(properties = {}) {
   const listeners = new Map();
@@ -22,12 +28,23 @@ function createFakeElement(properties = {}) {
     removeEventListener(type, listener) {
       listeners.get(type)?.delete(listener);
     },
+    querySelector(selector) {
+      return this.children?.get(selector) ?? null;
+    },
     dispatch(type, properties = {}) {
       const event = createFakeEvent(type, this, properties);
       for (const listener of listeners.get(type) ?? []) {
         listener(event);
       }
       return event;
+    },
+  };
+}
+
+function createFakeDocument(root, selector = "#board-app") {
+  return {
+    querySelector(requestedSelector) {
+      return requestedSelector === selector ? root : null;
     },
   };
 }
@@ -84,7 +101,7 @@ function createFakeCanvas(rect = { left: 10, top: 20, width: 200, height: 100 })
     },
     getContext(type) {
       assert.equal(type, "2d");
-      return {};
+      return createFakeCanvasContext();
     },
     setPointerCapture(pointerId) {
       this.capturedPointers.push(pointerId);
@@ -95,6 +112,21 @@ function createFakeCanvas(rect = { left: 10, top: 20, width: 200, height: 100 })
   });
 
   return canvas;
+}
+
+function createFakeCanvasContext() {
+  return {
+    clearRect() {},
+    save() {},
+    restore() {},
+    fillRect() {},
+    beginPath() {},
+    arc() {},
+    fill() {},
+    moveTo() {},
+    lineTo() {},
+    stroke() {},
+  };
 }
 
 function createDeferred() {
@@ -164,6 +196,61 @@ function createFakeTransport(options = {}) {
   };
 }
 
+function createFakeSignalingClient(options = {}) {
+  const handlers = new Set();
+  const connection = createDeferred();
+
+  return {
+    connected: false,
+    closed: false,
+    connectCalls: 0,
+    createdSessions: [],
+    joinedSessions: [],
+    sentSignals: [],
+    connect() {
+      this.connectCalls += 1;
+      if (options.deferConnect) {
+        return connection.promise.then(() => {
+          this.connected = true;
+        });
+      }
+
+      if (options.rejectConnect) {
+        return Promise.reject(new Error("signaling connect failed"));
+      }
+
+      this.connected = true;
+      return Promise.resolve();
+    },
+    resolveConnect() {
+      connection.resolve();
+    },
+    createSession(peerId) {
+      this.createdSessions.push(peerId);
+    },
+    joinSession(sessionId, peerId) {
+      this.joinedSessions.push({ sessionId, peerId });
+    },
+    sendSignal(message) {
+      this.sentSignals.push(message);
+    },
+    onMessage(handler) {
+      handlers.add(handler);
+      return () => {
+        handlers.delete(handler);
+      };
+    },
+    emit(message) {
+      for (const handler of handlers) {
+        handler(message);
+      }
+    },
+    close() {
+      this.closed = true;
+    },
+  };
+}
+
 function createFakeTimers() {
   const scheduled = [];
 
@@ -213,6 +300,30 @@ function createFixture(options = {}) {
   return { controller, elements, transport, timers, renders };
 }
 
+function createBoardAppRoot() {
+  const children = new Map([
+    ["[data-board-canvas]", createFakeCanvas()],
+    ["[data-board-control='surface']", createFakeElement({ value: "whiteboard" })],
+    ["[data-board-control='pen']", createFakeElement()],
+    ["[data-board-control='eraser']", createFakeElement()],
+    ["[data-board-control='pointer']", createFakeElement()],
+    [
+      "[data-board-control='ephemeral']",
+      createFakeElement({ checked: false }),
+    ],
+    ["[data-board-control='clear']", createFakeElement()],
+    ["[data-board-session]", createFakeElement()],
+  ]);
+
+  return createFakeElement({ children });
+}
+
+async function flushAsyncWork() {
+  for (let i = 0; i < 5; i += 1) {
+    await Promise.resolve();
+  }
+}
+
 function eventTypes(events) {
   return events.map((event) => event.type);
 }
@@ -226,6 +337,165 @@ test("createRelayURL maps http and https locations to /ws/relay", () => {
     createRelayURL({ protocol: "https:", host: "board.test" }),
     "wss://board.test/ws/relay",
   );
+});
+
+test("createSignalURL maps http and https locations to /signal", () => {
+  assert.equal(
+    createSignalURL({ protocol: "http:", host: "local.test:8080" }),
+    "ws://local.test:8080/signal",
+  );
+  assert.equal(
+    createSignalURL({ protocol: "https:", host: "board.test" }),
+    "wss://board.test/signal",
+  );
+});
+
+test("board app defaults to relay transport", () => {
+  const root = createBoardAppRoot();
+  const relayTransport = createFakeTransport();
+  const relayCalls = [];
+  const signalingCalls = [];
+
+  const controller = createBoardApp({
+    document: createFakeDocument(root),
+    location: { protocol: "http:", host: "local.test:8080", search: "" },
+    WebSocketImpl: class FakeWebSocket {},
+    createRelayTransport(options) {
+      relayCalls.push(options);
+      return relayTransport;
+    },
+    createSignalingClientImpl(options) {
+      signalingCalls.push(options);
+      return createFakeSignalingClient();
+    },
+  });
+
+  assert.equal(controller.getSnapshot().surface, "whiteboard");
+  assert.equal(relayCalls.length, 1);
+  assert.equal(relayCalls[0].url, "ws://local.test:8080/ws/relay");
+  assert.equal(relayTransport.connectCalls, 1);
+  assert.deepEqual(signalingCalls, []);
+
+  controller.close();
+});
+
+test("board app honors explicit relay transport mode", () => {
+  const root = createBoardAppRoot();
+  const relayTransport = createFakeTransport();
+  const relayCalls = [];
+
+  const controller = createBoardApp({
+    document: createFakeDocument(root),
+    location: {
+      protocol: "https:",
+      host: "board.test",
+      search: "?transport=relay",
+    },
+    WebSocketImpl: class FakeWebSocket {},
+    createRelayTransport(options) {
+      relayCalls.push(options);
+      return relayTransport;
+    },
+    createSignalingClientImpl() {
+      throw new Error("signaling should not be used in relay mode");
+    },
+  });
+
+  assert.equal(relayCalls.length, 1);
+  assert.equal(relayCalls[0].url, "wss://board.test/ws/relay");
+  assert.equal(relayTransport.connectCalls, 1);
+
+  controller.close();
+});
+
+test("webrtc board creates a session and waits for viewer ready before connecting data channel", async () => {
+  const root = createBoardAppRoot();
+  const signaling = createFakeSignalingClient();
+  const webRTCTransport = createFakeTransport();
+  const signalingCalls = [];
+  const webRTCCalls = [];
+  const errors = [];
+  class FakeRTCPeerConnection {}
+
+  const controller = createBoardApp({
+    document: createFakeDocument(root),
+    location: {
+      protocol: "https:",
+      host: "board.test",
+      search: "?transport=webrtc",
+    },
+    WebSocketImpl: class FakeWebSocket {},
+    RTCPeerConnectionImpl: FakeRTCPeerConnection,
+    createPeerId: () => "board-peer",
+    createRelayTransport() {
+      throw new Error("relay should not be used in webrtc mode");
+    },
+    createSignalingClientImpl(options) {
+      signalingCalls.push(options);
+      return signaling;
+    },
+    createWebRTCTransport(options) {
+      webRTCCalls.push(options);
+      return webRTCTransport;
+    },
+    reportError(error) {
+      errors.push(error);
+    },
+  });
+
+  await flushAsyncWork();
+
+  assert.equal(signalingCalls.length, 1);
+  assert.equal(signalingCalls[0].url, "wss://board.test/signal");
+  assert.equal(signaling.connectCalls, 1);
+  assert.deepEqual(signaling.createdSessions, ["board-peer"]);
+  assert.deepEqual(webRTCCalls, []);
+
+  signaling.emit({
+    type: "session:created",
+    sessionId: "session-42",
+    peerId: "board-peer",
+    role: "board",
+  });
+  await flushAsyncWork();
+
+  assert.match(
+    root.querySelector("[data-board-session]").textContent,
+    /session-42/,
+  );
+  assert.match(
+    root.querySelector("[data-board-session]").textContent,
+    /\/viewer\?transport=webrtc&sessionId=session-42/,
+  );
+  assert.deepEqual(webRTCCalls, []);
+
+  signaling.emit({
+    type: "signal:ice",
+    sessionId: "session-42",
+    peerId: "viewer-peer",
+    payload: { onboardViewerReady: true },
+  });
+  await flushAsyncWork();
+
+  assert.equal(webRTCCalls.length, 1);
+  assert.equal(webRTCCalls[0].signaling, signaling);
+  assert.equal(webRTCCalls[0].role, "board");
+  assert.equal(webRTCCalls[0].sessionId, "session-42");
+  assert.equal(webRTCCalls[0].peerId, "board-peer");
+  assert.equal(webRTCCalls[0].RTCPeerConnectionImpl, FakeRTCPeerConnection);
+  assert.equal(webRTCTransport.connectCalls, 1);
+  assert.deepEqual(errors, []);
+
+  controller.close();
+});
+
+test("index HTML exposes relay and WebRTC flow links", async () => {
+  const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
+
+  assert.match(html, /href="\/board"/);
+  assert.match(html, /href="\/viewer"/);
+  assert.match(html, /href="\/board\?transport=webrtc"/);
+  assert.match(html, /href="\/viewer\?transport=webrtc"/);
 });
 
 test("local publish uses a board-specific ID when relay snapshot already has evt_000001", async () => {
