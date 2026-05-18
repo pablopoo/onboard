@@ -9,22 +9,26 @@
   <body class="drawing-page">
     <main id="board-app" class="board-shell">
       <section class="toolbar" aria-label="Presenter controls">
-        <label>
+        <label class="toolbar-field">
           Surface
-          <select name="surface">
-            <option>Whiteboard</option>
-            <option>Blueboard</option>
-            <option>Blackboard</option>
-            <option>Greenboard</option>
+          <select name="surface" data-board-control="surface" aria-label="Board surface">
+            <option value="whiteboard">Whiteboard</option>
+            <option value="blueboard">Blueboard</option>
+            <option value="blackboard">Blackboard</option>
+            <option value="greenboard">Greenboard</option>
           </select>
         </label>
-        <button type="button">Pen</button>
-        <button type="button">Eraser</button>
-        <button type="button">Pointer</button>
-        <button type="button">Ephemeral</button>
-        <button type="button">Clear</button>
+        <button type="button" data-board-control="pen" aria-pressed="true">Marker</button>
+        <button type="button" data-board-control="eraser" aria-pressed="false">Eraser</button>
+        <button type="button" data-board-control="pointer" aria-pressed="false">Pointer</button>
+        <label class="toolbar-toggle">
+          <input type="checkbox" data-board-control="ephemeral">
+          Ephemeral
+        </label>
+        <button type="button" class="danger-button" data-board-control="clear">Clear all</button>
       </section>
-      <canvas id="board-canvas" class="board-canvas"></canvas>
+      <canvas id="board-canvas" class="board-canvas" data-board-canvas></canvas>
     </main>
+    <script type="module" src="/board/board.js"></script>
   </body>
 </html>
