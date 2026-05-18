@@ -182,6 +182,163 @@ func TestRelayIgnoresMalformedClientMessages(t *testing.T) {
 	}
 }
 
+func TestSignalAcceptsWebSocketConnection(t *testing.T) {
+	t.Parallel()
+
+	testServer := httptest.NewServer(server.New(server.Config{Mode: "local"}))
+	t.Cleanup(testServer.Close)
+
+	conn := dialSignal(t, testServer)
+	closeWebSocket(t, conn)
+}
+
+func TestSignalReportsMalformedMessagesAndKeepsSocketUsable(t *testing.T) {
+	t.Parallel()
+
+	testServer := httptest.NewServer(server.New(server.Config{Mode: "local"}))
+	t.Cleanup(testServer.Close)
+
+	conn := dialSignal(t, testServer)
+	defer closeWebSocket(t, conn)
+
+	writeSignalMessage(t, conn, []byte(`{"type":`))
+	assertSignalMessage(t, readSignalMessage(t, conn), signalTestMessage{
+		Type:  "error",
+		Error: "malformed message",
+	})
+
+	writeSignalJSON(t, conn, signalTestMessage{
+		Type:   "session:create",
+		PeerID: "board-1",
+	})
+	created := readSignalMessage(t, conn)
+	if created.Type != "session:created" {
+		t.Fatalf("message type = %q, want session:created: %#v", created.Type, created)
+	}
+	if created.SessionID == "" {
+		t.Fatalf("created session ID is empty: %#v", created)
+	}
+	if created.PeerID != "board-1" {
+		t.Fatalf("created peer ID = %q, want board-1", created.PeerID)
+	}
+	if created.Role != "board" {
+		t.Fatalf("created role = %q, want board", created.Role)
+	}
+}
+
+func TestSignalCreateJoinAndSignalMessagesUseRegistry(t *testing.T) {
+	t.Parallel()
+
+	testServer := httptest.NewServer(server.New(server.Config{Mode: "local"}))
+	t.Cleanup(testServer.Close)
+
+	board := dialSignal(t, testServer)
+	defer closeWebSocket(t, board)
+	viewer := dialSignal(t, testServer)
+	defer closeWebSocket(t, viewer)
+
+	writeSignalJSON(t, board, signalTestMessage{
+		Type:   "session:create",
+		PeerID: "board-1",
+	})
+	created := readSignalMessage(t, board)
+	if created.Type != "session:created" {
+		t.Fatalf("created type = %q, want session:created: %#v", created.Type, created)
+	}
+	if created.SessionID == "" {
+		t.Fatalf("created session ID is empty: %#v", created)
+	}
+	assertSignalMessage(t, created, signalTestMessage{
+		Type:      "session:created",
+		SessionID: created.SessionID,
+		PeerID:    "board-1",
+		Role:      "board",
+	})
+
+	writeSignalJSON(t, viewer, signalTestMessage{
+		Type:      "session:join",
+		SessionID: created.SessionID,
+		PeerID:    "viewer-1",
+	})
+	assertSignalMessage(t, readSignalMessage(t, viewer), signalTestMessage{
+		Type:      "session:joined",
+		SessionID: created.SessionID,
+		PeerID:    "viewer-1",
+		Role:      "viewer",
+	})
+
+	offerPayload := map[string]any{"sdp": "offer-sdp"}
+	writeSignalJSON(t, board, signalTestMessage{
+		Type:      "signal:offer",
+		SessionID: created.SessionID,
+		PeerID:    "board-1",
+		Payload:   offerPayload,
+	})
+	assertSignalMessage(t, readSignalMessage(t, viewer), signalTestMessage{
+		Type:      "signal:offer",
+		SessionID: created.SessionID,
+		PeerID:    "board-1",
+		Payload:   offerPayload,
+	})
+
+	answerPayload := map[string]any{"sdp": "answer-sdp"}
+	writeSignalJSON(t, viewer, signalTestMessage{
+		Type:      "signal:answer",
+		SessionID: created.SessionID,
+		PeerID:    "viewer-1",
+		Payload:   answerPayload,
+	})
+	assertSignalMessage(t, readSignalMessage(t, board), signalTestMessage{
+		Type:      "signal:answer",
+		SessionID: created.SessionID,
+		PeerID:    "viewer-1",
+		Payload:   answerPayload,
+	})
+
+	icePayload := map[string]any{"candidate": "candidate-1"}
+	writeSignalJSON(t, board, signalTestMessage{
+		Type:      "signal:ice",
+		SessionID: created.SessionID,
+		PeerID:    "board-1",
+		Payload:   icePayload,
+	})
+	assertSignalMessage(t, readSignalMessage(t, viewer), signalTestMessage{
+		Type:      "signal:ice",
+		SessionID: created.SessionID,
+		PeerID:    "board-1",
+		Payload:   icePayload,
+	})
+}
+
+func TestSignalReportsUnknownSessionAndKeepsSocketUsable(t *testing.T) {
+	t.Parallel()
+
+	testServer := httptest.NewServer(server.New(server.Config{Mode: "local"}))
+	t.Cleanup(testServer.Close)
+
+	conn := dialSignal(t, testServer)
+	defer closeWebSocket(t, conn)
+
+	writeSignalJSON(t, conn, signalTestMessage{
+		Type:      "session:join",
+		SessionID: "missing-session",
+		PeerID:    "viewer-1",
+	})
+	assertSignalMessage(t, readSignalMessage(t, conn), signalTestMessage{
+		Type:  "error",
+		Error: "unknown session",
+	})
+
+	writeSignalJSON(t, conn, signalTestMessage{
+		Type:   "session:create",
+		PeerID: "board-1",
+	})
+	created := readSignalMessage(t, conn)
+	if created.Type != "session:created" {
+		t.Fatalf("message type = %q, want session:created: %#v", created.Type, created)
+	}
+}
+
 func dialRelay(t *testing.T, testServer *httptest.Server) *websocket.Conn {
 	t.Helper()
 
@@ -200,6 +357,24 @@ func dialRelay(t *testing.T, testServer *httptest.Server) *websocket.Conn {
 	return conn
 }
 
+func dialSignal(t *testing.T, testServer *httptest.Server) *websocket.Conn {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	url := "ws" + strings.TrimPrefix(testServer.URL, "http") + "/signal"
+	conn, response, err := websocket.Dial(ctx, url, nil)
+	if err != nil {
+		if response != nil {
+			t.Fatalf("dial signal: %v, status %d", err, response.StatusCode)
+		}
+		t.Fatalf("dial signal: %v", err)
+	}
+
+	return conn
+}
+
 func writeRelayEvent(t *testing.T, conn *websocket.Conn, event hub.Event) {
 	t.Helper()
 
@@ -212,6 +387,26 @@ func writeRelayEvent(t *testing.T, conn *websocket.Conn, event hub.Event) {
 	defer cancel()
 	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
 		t.Fatalf("write relay event: %v", err)
+	}
+}
+
+func writeSignalJSON(t *testing.T, conn *websocket.Conn, message signalTestMessage) {
+	t.Helper()
+
+	data, err := json.Marshal(message)
+	if err != nil {
+		t.Fatalf("marshal signal message: %v", err)
+	}
+	writeSignalMessage(t, conn, data)
+}
+
+func writeSignalMessage(t *testing.T, conn *websocket.Conn, data []byte) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+		t.Fatalf("write signal message: %v", err)
 	}
 }
 
@@ -236,6 +431,27 @@ func readRelayEvent(t *testing.T, conn *websocket.Conn) hub.Event {
 	return event
 }
 
+func readSignalMessage(t *testing.T, conn *websocket.Conn) signalTestMessage {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	messageType, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read signal message: %v", err)
+	}
+	if messageType != websocket.MessageText {
+		t.Fatalf("message type = %v, want %v", messageType, websocket.MessageText)
+	}
+
+	var message signalTestMessage
+	if err := json.Unmarshal(data, &message); err != nil {
+		t.Fatalf("unmarshal signal message %q: %v", data, err)
+	}
+	return message
+}
+
 func assertNoRelayMessage(t *testing.T, conn *websocket.Conn) {
 	t.Helper()
 
@@ -256,6 +472,28 @@ func assertNoRelayMessage(t *testing.T, conn *websocket.Conn) {
 		}
 	case <-time.After(150 * time.Millisecond):
 	}
+}
+
+func assertSignalMessage(t *testing.T, got signalTestMessage, want signalTestMessage) {
+	t.Helper()
+
+	if got.Type != want.Type ||
+		got.SessionID != want.SessionID ||
+		got.PeerID != want.PeerID ||
+		got.Role != want.Role ||
+		got.Error != want.Error ||
+		!reflectPayload(got.Payload, want.Payload) {
+		t.Fatalf("signal message = %#v, want %#v", got, want)
+	}
+}
+
+type signalTestMessage struct {
+	Type      string         `json:"type"`
+	SessionID string         `json:"sessionId,omitempty"`
+	PeerID    string         `json:"peerId,omitempty"`
+	Role      string         `json:"role,omitempty"`
+	Payload   map[string]any `json:"payload,omitempty"`
+	Error     string         `json:"error,omitempty"`
 }
 
 func closeWebSocket(t *testing.T, conn *websocket.Conn) {
