@@ -1,0 +1,8 @@
+{
+  "name": "onboard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:js": "node --test web/**/*.test.mjs"
+  }
+}
