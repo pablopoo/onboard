@@ -47,6 +47,9 @@ Follow the project tree documented in `docs/architecture.md`. Keep shared browse
 - Before editing, inspect existing files and follow the established structure.
 - Keep changes scoped to the current phase.
 - Do not add frameworks, build tools, or dependencies without a concrete reason.
+- Follow `docs/security.md` before adding or updating dependencies.
+- Keep `package-lock.json`, `go.mod`, and `go.sum` in sync with dependency changes.
+- Do not enable npm lifecycle scripts globally. If a package needs install scripts, document why and use an explicit one-command override.
 - Prefer readable boring code over abstractions.
 - Document phase decisions when they affect later implementation.
 - Verify work before claiming it is complete.

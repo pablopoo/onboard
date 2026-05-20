@@ -73,8 +73,15 @@ The release script writes:
 bash tests/build-release-test.sh
 GOCACHE=/tmp/onboard-go-build-cache /usr/local/go/bin/go test ./...
 npm run test:js
+npm run security:npm
 git diff --check
 ```
+
+## Dependency Security
+
+Keep the dependency surface small. Go dependencies are pinned by `go.mod` and
+`go.sum`; npm is pinned by `package.json`, `.npmrc`, and `package-lock.json`.
+See `docs/security.md` before adding any package.
 
 ## Project Structure
 

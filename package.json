@@ -1,8 +1,14 @@
 {
   "name": "onboard",
   "private": true,
+  "packageManager": "npm@11.6.2",
+  "engines": {
+    "node": "24.11.1",
+    "npm": "11.6.2"
+  },
   "type": "module",
   "scripts": {
-    "test:js": "node --test web/**/*.test.mjs"
+    "test:js": "node --test web/**/*.test.mjs",
+    "security:npm": "npm audit --audit-level=moderate"
   }
 }
