@@ -21,11 +21,35 @@ import (
 	"onboard/web"
 )
 
-const relayWriteTimeout = 5 * time.Second
+const (
+	relayWriteTimeout    = 5 * time.Second
+	relayReadLimitBytes  = 4 << 20
+	signalReadLimitBytes = 1 << 20
+	maxRelayStrokeWidth  = 128
+	conflictCloseDelay   = 50 * time.Millisecond
+)
+
+var relaySurfaces = map[string]struct{}{
+	"whiteboard": {},
+	"blueboard":  {},
+	"blackboard": {},
+	"greenboard": {},
+}
+
+var relayMarkerSurfaces = map[string]struct{}{
+	"whiteboard": {},
+	"blueboard":  {},
+}
+
+var relayChalkSurfaces = map[string]struct{}{
+	"blackboard": {},
+	"greenboard": {},
+}
 
 type Config struct {
 	Mode           string
 	Addr           string
+	BaseURLs       []string
 	RelayHub       *hub.Hub
 	SignalRegistry *signaling.Registry
 }
@@ -60,10 +84,35 @@ func New(config Config) http.Handler {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok"))
 	})
+	mux.HandleFunc("/api/share", shareEndpoint(config.BaseURLs))
 	mux.HandleFunc("/ws/relay", relayEndpoint(relay))
 	mux.HandleFunc("/signal", signalEndpoint(signalRegistry, signalPeers))
 
 	return mux
+}
+
+func shareEndpoint(configBaseURLs []string) http.HandlerFunc {
+	baseURLs := normalizedBaseURLs(configBaseURLs)
+	return func(w http.ResponseWriter, r *http.Request) {
+		response := shareResponse{
+			BaseURLs: append([]string(nil), baseURLs...),
+			Paths: sharePaths{
+				Home:   "/",
+				Board:  "/board",
+				Viewer: "/viewer",
+			},
+		}
+
+		if origin := requestOrigin(r); origin != "" && !containsString(response.BaseURLs, origin) {
+			response.BaseURLs = append(response.BaseURLs, origin)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+	}
 }
 
 func serveAsset(w http.ResponseWriter, r *http.Request, name string) {
@@ -89,9 +138,25 @@ func relayEndpoint(relay *hub.Hub) http.HandlerFunc {
 		if err != nil {
 			return
 		}
+		conn.SetReadLimit(relayReadLimitBytes)
 		defer conn.CloseNow()
 
-		snapshot, events, unsubscribe := relay.SubscribeWithSnapshot()
+		role := relayRole(r)
+		presenter := role == hub.RoleBoard
+		if presenter {
+			if !relay.AcquirePresenter() {
+				_ = writeRelaySystemEvent(conn, relaySystemEvent{
+					Type:    "system:presenter-conflict",
+					Payload: map[string]any{"reason": "presenter-active"},
+				})
+				time.Sleep(conflictCloseDelay)
+				_ = conn.Close(websocket.StatusPolicyViolation, "presenter active")
+				return
+			}
+			defer relay.ReleasePresenter()
+		}
+
+		snapshot, events, unsubscribe := relay.SubscribeWithSnapshotRole(role)
 		subscribed := true
 		cleanup := func() {
 			if subscribed {
@@ -128,6 +193,9 @@ func relayEndpoint(relay *hub.Hub) http.HandlerFunc {
 			if messageType != websocket.MessageText {
 				continue
 			}
+			if !presenter {
+				continue
+			}
 
 			event, ok := parseRelayEvent(data)
 			if !ok {
@@ -142,12 +210,20 @@ func relayEndpoint(relay *hub.Hub) http.HandlerFunc {
 	}
 }
 
+func relayRole(r *http.Request) string {
+	if r.URL.Query().Get("role") == hub.RoleBoard {
+		return hub.RoleBoard
+	}
+	return hub.RoleViewer
+}
+
 func signalEndpoint(registry *signaling.Registry, peers *signalPeerIndex) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return
 		}
+		conn.SetReadLimit(signalReadLimitBytes)
 		defer conn.CloseNow()
 
 		var writeMu sync.Mutex
@@ -198,12 +274,16 @@ func signalEndpoint(registry *signaling.Registry, peers *signalPeerIndex) http.H
 			go func() {
 				defer close(done)
 				for signal := range signals {
-					fromPeerID, ok := peers.PairedPeerID(sessionID, peerID)
-					if !ok {
-						continue
+					fromPeerID := signal.FromPeerID
+					if fromPeerID == "" {
+						pairedPeerID, ok := peers.PairedPeerID(sessionID, peerID)
+						if !ok {
+							continue
+						}
+						fromPeerID = pairedPeerID
 					}
 					message := signalMessage{
-						Type:      "signal:" + string(signal.Type),
+						Type:      signalMessageType(signal.Type),
 						SessionID: sessionID,
 						PeerID:    fromPeerID,
 						Payload:   signal.Payload,
@@ -329,7 +409,24 @@ func signalEndpoint(registry *signaling.Registry, peers *signalPeerIndex) http.H
 	}
 }
 
+func signalMessageType(signalType signaling.SignalType) string {
+	if signalType == signaling.SignalPeerLeft {
+		return "session:peer-left"
+	}
+	return "signal:" + string(signalType)
+}
+
 func writeRelayEvent(conn *websocket.Conn, event hub.Event) error {
+	data, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), relayWriteTimeout)
+	defer cancel()
+	return conn.Write(ctx, websocket.MessageText, data)
+}
+
+func writeRelaySystemEvent(conn *websocket.Conn, event relaySystemEvent) error {
 	data, err := json.Marshal(event)
 	if err != nil {
 		return err
@@ -387,13 +484,230 @@ func parseRelayEvent(data []byte) (hub.Event, bool) {
 		return hub.Event{}, false
 	}
 
-	return hub.Event{
+	event := hub.Event{
 		ID:      id,
 		Type:    eventType,
 		BoardID: boardID,
 		At:      at,
 		Payload: payload,
-	}, true
+	}
+	if !validateRelayEvent(event) {
+		return hub.Event{}, false
+	}
+	return event, true
+}
+
+func validateRelayEvent(event hub.Event) bool {
+	switch event.Type {
+	case "board:set-surface":
+		return validateRelaySurfacePayload(event.Payload)
+	case "stroke:start":
+		return validateRelayStrokeStartPayload(event.Payload)
+	case "stroke:point":
+		return validateRelayStrokePointPayload(event.Payload)
+	case "stroke:end", "stroke:expire", "board:undo":
+		return validateRelayStrokeIDPayload(event.Payload)
+	case "board:restore":
+		return validateRelayRestorePayload(event.Payload)
+	case "pointer:show", "pointer:move":
+		return validateRelayPointPayload(event.Payload)
+	case "pointer:hide", "board:clear":
+		return len(event.Payload) == 0
+	default:
+		return false
+	}
+}
+
+func validateRelaySurfacePayload(payload map[string]any) bool {
+	surface, ok := relayPayloadString(payload, "surface")
+	return ok && isRelaySurface(surface)
+}
+
+func validateRelayStrokeStartPayload(payload map[string]any) bool {
+	strokeIDOK := validateRelayStrokeIDPayload(payload)
+	surface, surfaceOK := relayPayloadString(payload, "surface")
+	tool, toolOK := relayPayloadString(payload, "tool")
+	color, colorOK := relayPayloadString(payload, "color")
+	width, widthOK := relayPayloadNumber(payload, "width")
+	if !strokeIDOK ||
+		!surfaceOK ||
+		!isRelaySurface(surface) ||
+		!toolOK ||
+		!isRelayToolAllowedForSurface(tool, surface) ||
+		!colorOK ||
+		strings.TrimSpace(color) == "" ||
+		!widthOK ||
+		width <= 0 ||
+		width > maxRelayStrokeWidth ||
+		!validateRelayPointPayload(payload) {
+		return false
+	}
+
+	ephemeral, hasEphemeral := payload["ephemeral"]
+	if hasEphemeral {
+		if _, ok := ephemeral.(bool); !ok {
+			return false
+		}
+	}
+	_, hasExpiresAt := payload["expiresAt"]
+	if ephemeral == true {
+		_, ok := relayPayloadNumber(payload, "expiresAt")
+		return ok
+	}
+	if hasExpiresAt {
+		return false
+	}
+	return true
+}
+
+func validateRelayStrokePointPayload(payload map[string]any) bool {
+	return validateRelayStrokeIDPayload(payload) && validateRelayPointPayload(payload)
+}
+
+func validateRelayStrokeIDPayload(payload map[string]any) bool {
+	_, ok := relayPayloadString(payload, "strokeId")
+	return ok
+}
+
+func validateRelayRestorePayload(payload map[string]any) bool {
+	if !validateRelaySurfacePayload(payload) {
+		return false
+	}
+
+	strokes, ok := payload["strokes"].([]any)
+	if !ok {
+		return false
+	}
+	for _, value := range strokes {
+		stroke, ok := value.(map[string]any)
+		if !ok || !validateRelayRestoredStroke(stroke) {
+			return false
+		}
+	}
+
+	pointer, ok := payload["pointer"].(map[string]any)
+	return ok && validateRelayPointerSnapshot(pointer)
+}
+
+func validateRelayRestoredStroke(stroke map[string]any) bool {
+	strokeIDOK := validateRelayStrokeIDPayload(stroke)
+	surface, surfaceOK := relayPayloadString(stroke, "surface")
+	tool, toolOK := relayPayloadString(stroke, "tool")
+	color, colorOK := relayPayloadString(stroke, "color")
+	width, widthOK := relayPayloadNumber(stroke, "width")
+	points, pointsOK := stroke["points"].([]any)
+	_, completeOK := stroke["complete"].(bool)
+	if !strokeIDOK ||
+		!surfaceOK ||
+		!isRelaySurface(surface) ||
+		!toolOK ||
+		!isRelayToolAllowedForSurface(tool, surface) ||
+		!colorOK ||
+		strings.TrimSpace(color) == "" ||
+		!widthOK ||
+		width <= 0 ||
+		width > maxRelayStrokeWidth ||
+		!pointsOK ||
+		len(points) == 0 ||
+		!completeOK {
+		return false
+	}
+	for _, value := range points {
+		point, ok := value.(map[string]any)
+		if !ok || !validateRelayPointPayload(map[string]any{"point": point}) {
+			return false
+		}
+	}
+
+	ephemeral, hasEphemeral := stroke["ephemeral"]
+	if hasEphemeral {
+		if _, ok := ephemeral.(bool); !ok {
+			return false
+		}
+	}
+	_, hasExpiresAt := stroke["expiresAt"]
+	if ephemeral == true {
+		_, ok := relayPayloadNumber(stroke, "expiresAt")
+		return ok
+	}
+	if hasExpiresAt {
+		return false
+	}
+	return true
+}
+
+func validateRelayPointerSnapshot(pointer map[string]any) bool {
+	visible, ok := pointer["visible"].(bool)
+	if !ok {
+		return false
+	}
+	if !visible {
+		return pointer["point"] == nil
+	}
+	return validateRelayPointPayload(pointer)
+}
+
+func validateRelayPointPayload(payload map[string]any) bool {
+	point, ok := payload["point"].(map[string]any)
+	if !ok {
+		return false
+	}
+
+	x, xOK := relayPayloadNumber(point, "x")
+	y, yOK := relayPayloadNumber(point, "y")
+	if !xOK || !yOK || !isRelayUnitNumber(x) || !isRelayUnitNumber(y) {
+		return false
+	}
+
+	if _, exists := point["pressure"]; exists {
+		pressure, ok := relayPayloadNumber(point, "pressure")
+		return ok && isRelayUnitNumber(pressure)
+	}
+	return true
+}
+
+func relayPayloadString(payload map[string]any, key string) (string, bool) {
+	value, ok := payload[key].(string)
+	if !ok || strings.TrimSpace(value) == "" {
+		return "", false
+	}
+	return value, true
+}
+
+func relayPayloadNumber(payload map[string]any, key string) (float64, bool) {
+	value, ok := payload[key]
+	if !ok {
+		return 0, false
+	}
+	number, ok := value.(float64)
+	if !ok || math.IsInf(number, 0) || math.IsNaN(number) {
+		return 0, false
+	}
+	return number, true
+}
+
+func isRelaySurface(surface string) bool {
+	_, ok := relaySurfaces[surface]
+	return ok
+}
+
+func isRelayToolAllowedForSurface(tool string, surface string) bool {
+	if tool == "eraser" {
+		return isRelaySurface(surface)
+	}
+	if tool == "marker" {
+		_, ok := relayMarkerSurfaces[surface]
+		return ok
+	}
+	if tool == "chalk" {
+		_, ok := relayChalkSurfaces[surface]
+		return ok
+	}
+	return false
+}
+
+func isRelayUnitNumber(value float64) bool {
+	return value >= 0 && value <= 1
 }
 
 func parseSignalMessage(data []byte) (signalMessage, bool) {
@@ -515,6 +829,65 @@ type signalMessage struct {
 	Role      string         `json:"role,omitempty"`
 	Payload   map[string]any `json:"payload,omitempty"`
 	Error     string         `json:"error,omitempty"`
+}
+
+type relaySystemEvent struct {
+	Type    string         `json:"type"`
+	Payload map[string]any `json:"payload"`
+}
+
+type shareResponse struct {
+	BaseURLs []string   `json:"baseUrls"`
+	Paths    sharePaths `json:"paths"`
+}
+
+type sharePaths struct {
+	Home   string `json:"home"`
+	Board  string `json:"board"`
+	Viewer string `json:"viewer"`
+}
+
+func normalizedBaseURLs(baseURLs []string) []string {
+	normalized := make([]string, 0, len(baseURLs))
+	for _, baseURL := range baseURLs {
+		baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+		if baseURL == "" || containsString(normalized, baseURL) {
+			continue
+		}
+		normalized = append(normalized, baseURL)
+	}
+	return normalized
+}
+
+func requestOrigin(r *http.Request) string {
+	host := strings.TrimSpace(r.Host)
+	if host == "" {
+		return ""
+	}
+
+	scheme := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
+	if scheme == "" {
+		scheme = "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+	}
+	if comma := strings.Index(scheme, ","); comma >= 0 {
+		scheme = strings.TrimSpace(scheme[:comma])
+	}
+	if scheme == "" {
+		return ""
+	}
+	return scheme + "://" + host
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 type signalPeerIndex struct {

@@ -25,6 +25,7 @@ Presenter tools on the Board include:
 - Board surface: whiteboard, blueboard, blackboard, or greenboard.
 - Compatible pen type: marker for whiteboard/blueboard, chalk for
   blackboard/greenboard.
+- Viewer share link with QR code.
 - Eraser.
 - Clear all.
 - Pointer.
@@ -42,17 +43,20 @@ Development uses the Go toolchain at `/usr/local/go/bin/go`.
 /usr/local/go/bin/go run ./cmd/onboard
 ```
 
-To make the app reachable from other devices on the same local network, bind it
-to a LAN-facing address and open the printed paths from the other browser:
+By default, the app listens on port `8080`. If that port is already in use, it
+falls back to a random available port and prints the actual links.
+
+The terminal and home page print direct Board and Viewer links for this
+computer and, when available, the most likely direct LAN Board and Viewer links
+for another device. The home page and Board share panel also show QR codes for
+those links when they fit the compact local QR size; the visible URL and Copy
+button remain available if a hosted link is too long. The app filters common
+Docker and VM bridge interfaces out of the main path so the printed links stay
+readable. Use `ONBOARD_ADDR` only when you want a custom bind address or port:
 
 ```bash
-ONBOARD_ADDR=0.0.0.0:8080 /usr/local/go/bin/go run ./cmd/onboard
+ONBOARD_ADDR=127.0.0.1:9090 /usr/local/go/bin/go run ./cmd/onboard
 ```
-
-Then use:
-
-- `http://<your-computer-ip>:8080/board` for the drawing device.
-- `http://<your-computer-ip>:8080/viewer` for the shared browser tab.
 
 ## Build Release Binaries
 
@@ -74,6 +78,7 @@ bash tests/build-release-test.sh
 GOCACHE=/tmp/onboard-go-build-cache /usr/local/go/bin/go test ./...
 npm run test:js
 npm run security:npm
+bash tests/local-browser-smoke.sh
 git diff --check
 ```
 

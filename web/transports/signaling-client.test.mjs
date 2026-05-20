@@ -196,6 +196,30 @@ test("connect rejects if the WebSocket closes before open", async () => {
   await assert.rejects(connection, /open/i);
 });
 
+test("post-open WebSocket close notifies handlers and allows reconnect", async () => {
+  const WebSocketImpl = makeFakeWebSocketClass();
+  const client = createSignalingClient({ WebSocketImpl });
+  const received = [];
+
+  client.onMessage((incoming) => received.push(incoming));
+  await connectAndOpen(client, WebSocketImpl);
+
+  WebSocketImpl.instances[0].dispatchClose();
+
+  assert.deepEqual(received, [
+    {
+      type: "error",
+      error: "WebSocket signaling closed",
+    },
+  ]);
+
+  const connection = client.connect();
+  WebSocketImpl.instances[1].dispatchOpen();
+  await connection;
+
+  assert.equal(WebSocketImpl.instances.length, 2);
+});
+
 test("createSession sends session:create with peerId", async () => {
   const WebSocketImpl = makeFakeWebSocketClass();
   const client = createSignalingClient({ WebSocketImpl });
@@ -343,6 +367,12 @@ test("message events parse JSON and call registered handlers", async () => {
     {
       type: "error",
       error: "unknown session",
+    },
+    {
+      type: "session:peer-left",
+      sessionId: "session-1",
+      peerId: "viewer-1",
+      payload: { role: "viewer" },
     },
   ];
 

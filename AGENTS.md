@@ -56,10 +56,10 @@ Follow the project tree documented in `docs/architecture.md`. Keep shared browse
 
 ## Current Phase
 
-Phase 01 is foundation only:
+Reliability hardening for a real-use local board tool:
 
-- Define product objective.
-- Define repository structure.
-- Define agent responsibilities.
-- Define phased roadmap.
-- Avoid app implementation until the foundation is clear.
+- Keep the Board and Viewer happy path simple: start app, open Board, open Viewer, draw.
+- Preserve the shared browser core across relay and WebRTC transports.
+- Tighten reconnect, failure, resize, mobile, and viewer-only behavior with focused tests.
+- Keep visual/UI polish scoped to making the Board feel usable on desktop, tablet, and phone.
+- Verify changes with unit tests and the local browser smoke script before claiming completion.

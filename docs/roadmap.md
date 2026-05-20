@@ -20,8 +20,42 @@ Delivered:
 - Approach 3 signaling registry in `internal/signaling`.
 - WebSocket relay transport.
 - WebRTC DataChannel transport.
+- Relay reconnect lifecycle status for Board and Viewer.
+- Direct startup links for local Board/Viewer and LAN Board/Viewer URLs.
+- Startup and home share links prefer physical LAN interfaces and suppress
+  noisy Docker/VM bridge addresses unless no better LAN candidate exists.
+- Home share rows include local QR codes for opening Board and Viewer links on
+  another device without typing the address.
+- Board More panel includes a Viewer QR code so the presenter can pair/open a
+  Viewer directly from the drawing screen.
+- WebRTC Board sharing waits for a real session URL before enabling Viewer
+  open/copy actions, avoiding incomplete hosted Viewer links.
+- WebRTC signaling socket drops after connection are surfaced to pending
+  Board/Viewer setup instead of leaving the pairing flow waiting forever.
+- WebRTC DataChannel setup fails fast and cleans up when signaling reports an
+  error, such as an unknown or expired session.
+- WebRTC data-channel reconnect failures are reported through Board/Viewer
+  error paths while still updating visible disconnected status.
+- WebRTC Board input queues while the data channel is reconnecting and flushes
+  when the channel returns, without overwriting the WebRTC session label.
+- WebRTC Board sends a current board snapshot when the data channel reconnects
+  so a reloaded/rejoined Viewer receives existing writing.
+- Share links remain usable when a URL is too long for the compact QR code:
+  the QR area falls back without breaking the visible URL or copy action.
+- Home and Board share copy buttons report clipboard failure instead of showing
+  false success when browser copy APIs are blocked or unavailable.
+- Predictable default port `8080` with random-port fallback when unavailable.
+- Browser-level relay reconnect smoke coverage.
+- Relay viewer-presence status on the Board toolbar.
+- Board toolbar Viewer share link under the More control.
+- Mobile Board controls use a compact bottom dock that expands into the full
+  toolbar and collapses again after compact choices or drawing input.
+- WebRTC disconnect lifecycle status for Board and Viewer.
+- Same-session WebRTC data-channel reconnect behavior for Board and Viewer.
+- Browser-level WebRTC reconnect smoke coverage.
 - Unit tests for Go server pieces and browser product logic.
-- Local browser smoke script.
+- Local browser smoke script covering relay sync, mobile drawing, presenter
+  lockout, WebRTC pairing, and high-DPR resize behavior.
 
 ## Current Architecture Phase: Dual Runtime Paths
 
@@ -52,6 +86,7 @@ Board presenter tools:
 
 - Board surface.
 - Compatible pen type.
+- Viewer share link and QR code.
 - Eraser.
 - Clear all.
 - Pointer.
@@ -89,12 +124,7 @@ Keep future work small and testable.
 
 Likely next areas:
 
-- LAN startup polish: clearer host/IP output, optional fixed default port, QR
-  links for Board and Viewer.
-- Reconnect behavior for relay and WebRTC transports.
 - WebRTC hosted deployment notes, HTTPS requirements, and failure states.
-- Manual browser smoke coverage for the WebRTC pairing path.
-- Canvas resize and device-pixel-ratio checks across common devices.
 - Packaging notes for unsigned Windows and macOS binaries.
 - Optional signing/notarization only if public distribution needs it.
 - Persistence only if repeated real use proves it is needed.

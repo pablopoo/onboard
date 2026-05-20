@@ -118,6 +118,33 @@ func TestReleaseViewerAllowsAnotherViewerToJoin(t *testing.T) {
 	}
 }
 
+func TestReleaseViewerNotifiesBoardSubscriber(t *testing.T) {
+	t.Parallel()
+
+	registry := signaling.NewRegistry()
+	session := createPairedSession(t, registry)
+	boardMessages, unsubscribeBoard, err := registry.Subscribe(session.ID, "board-1")
+	if err != nil {
+		t.Fatalf("Subscribe board returned error: %v", err)
+	}
+	defer unsubscribeBoard()
+
+	if err := registry.ReleasePeer(session.ID, "viewer-1"); err != nil {
+		t.Fatalf("ReleasePeer returned error: %v", err)
+	}
+
+	got := receiveSignal(t, boardMessages)
+	if got.Type != signaling.SignalPeerLeft {
+		t.Fatalf("peer-left signal type = %q, want %q", got.Type, signaling.SignalPeerLeft)
+	}
+	if got.FromPeerID != "viewer-1" {
+		t.Fatalf("peer-left FromPeerID = %q, want viewer-1", got.FromPeerID)
+	}
+	if got.Payload["role"] != string(signaling.RoleViewer) {
+		t.Fatalf("peer-left role = %v, want %q", got.Payload["role"], signaling.RoleViewer)
+	}
+}
+
 func TestReleaseBoardDeletesSession(t *testing.T) {
 	t.Parallel()
 
@@ -159,8 +186,10 @@ func TestSubscribeReturnsMessagesForOnePeerOnly(t *testing.T) {
 	}
 
 	got := receiveSignal(t, viewerMessages)
-	if !reflect.DeepEqual(got, offer) {
-		t.Fatalf("viewer signal = %#v, want %#v", got, offer)
+	want := offer
+	want.FromPeerID = "board-1"
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("viewer signal = %#v, want %#v", got, want)
 	}
 	assertNoSignal(t, boardMessages)
 }
@@ -195,14 +224,20 @@ func TestSendSignalRoutesOfferAnswerAndIceToPairedPeer(t *testing.T) {
 		t.Fatalf("SendSignal ice returned error: %v", err)
 	}
 
-	if got := receiveSignal(t, viewerMessages); !reflect.DeepEqual(got, offer) {
-		t.Fatalf("viewer offer = %#v, want %#v", got, offer)
+	wantOffer := offer
+	wantOffer.FromPeerID = "board-1"
+	if got := receiveSignal(t, viewerMessages); !reflect.DeepEqual(got, wantOffer) {
+		t.Fatalf("viewer offer = %#v, want %#v", got, wantOffer)
 	}
-	if got := receiveSignal(t, boardMessages); !reflect.DeepEqual(got, answer) {
-		t.Fatalf("board answer = %#v, want %#v", got, answer)
+	wantAnswer := answer
+	wantAnswer.FromPeerID = "viewer-1"
+	if got := receiveSignal(t, boardMessages); !reflect.DeepEqual(got, wantAnswer) {
+		t.Fatalf("board answer = %#v, want %#v", got, wantAnswer)
 	}
-	if got := receiveSignal(t, boardMessages); !reflect.DeepEqual(got, ice) {
-		t.Fatalf("board ice = %#v, want %#v", got, ice)
+	wantICE := ice
+	wantICE.FromPeerID = "viewer-1"
+	if got := receiveSignal(t, boardMessages); !reflect.DeepEqual(got, wantICE) {
+		t.Fatalf("board ice = %#v, want %#v", got, wantICE)
 	}
 }
 

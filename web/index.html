@@ -4,19 +4,38 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Onboard</title>
+    <link rel="icon" href="data:,">
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body class="home-page">
-    <main class="home">
-      <h1>Onboard</h1>
-      <nav class="home-links" aria-label="Open board surfaces">
-        <a href="/board">Relay board</a>
-        <a href="/viewer">Relay viewer</a>
-      </nav>
-      <nav class="home-links" aria-label="Open WebRTC surfaces">
-        <a href="/board?transport=webrtc">WebRTC board</a>
-        <a href="/viewer?transport=webrtc">WebRTC viewer</a>
-      </nav>
+    <main id="home-app" class="home">
+      <section class="home-hero" aria-labelledby="home-title">
+        <p class="home-kicker">Local live board</p>
+        <h1 id="home-title">Onboard</h1>
+        <div class="home-actions" aria-label="Open relay surfaces">
+          <a class="home-primary-link" href="/board">Open Board</a>
+          <a href="/viewer">Open Viewer</a>
+        </div>
+      </section>
+
+      <section class="share-panel" aria-labelledby="share-title">
+        <div class="share-heading">
+          <h2 id="share-title">Share</h2>
+          <p data-share-status>Ready</p>
+        </div>
+        <div class="share-list" data-share-list></div>
+      </section>
+
+      <section class="share-panel compact-panel" aria-labelledby="advanced-title">
+        <div class="share-heading">
+          <h2 id="advanced-title">Advanced</h2>
+        </div>
+        <div class="home-actions compact-actions" aria-label="Open WebRTC surfaces">
+          <a href="/board?transport=webrtc">WebRTC Board</a>
+          <a href="/viewer?transport=webrtc">WebRTC Viewer</a>
+        </div>
+      </section>
     </main>
+    <script type="module" src="/home/home.js"></script>
   </body>
 </html>

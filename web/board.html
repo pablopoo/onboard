@@ -4,30 +4,216 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Onboard Board</title>
+    <link rel="icon" href="data:,">
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body class="drawing-page">
-    <main id="board-app" class="board-shell">
-      <section class="toolbar" aria-label="Presenter controls">
-        <label class="toolbar-field">
-          Surface
-          <select name="surface" data-board-control="surface" aria-label="Board surface">
-            <option value="whiteboard">Whiteboard</option>
-            <option value="blueboard">Blueboard</option>
-            <option value="blackboard">Blackboard</option>
-            <option value="greenboard">Greenboard</option>
-          </select>
+    <main id="board-app" class="board-shell is-toolbar-collapsed">
+      <div class="mobile-toolbar-dock" aria-label="Compact presenter controls">
+        <button
+          type="button"
+          class="mobile-toolbar-toggle"
+          data-board-control="toolbar-toggle"
+          aria-expanded="false"
+          aria-controls="presenter-toolbar"
+          title="Tools"
+        >
+          <span class="mobile-surface-dot" aria-hidden="true"></span>
+          <span class="mobile-tool-icon-shell" aria-hidden="true">
+            <svg class="tool-icon mobile-mode-icon" viewBox="0 0 24 24" data-mobile-tool-icon="draw">
+              <path d="M4 20l4.4-1 9.9-9.9-3.4-3.4L5 15.6 4 20z"></path>
+              <path d="M13.7 6.9l3.4 3.4"></path>
+            </svg>
+            <svg class="tool-icon mobile-mode-icon" viewBox="0 0 24 24" data-mobile-tool-icon="eraser" hidden>
+              <path d="M4.6 15.8l8.8-8.8a2 2 0 0 1 2.8 0l3 3a2 2 0 0 1 0 2.8l-6.5 6.5H7.1l-2.5-2.5a1.4 1.4 0 0 1 0-2z"></path>
+              <path d="M10.8 9.6l5.6 5.6"></path>
+            </svg>
+            <svg class="tool-icon mobile-mode-icon" viewBox="0 0 24 24" data-mobile-tool-icon="pointer" hidden>
+              <path d="M5 3l14 8-6.2 1.5L10 19 5 3z"></path>
+              <path d="M12.8 12.5l4 5"></path>
+            </svg>
+            <span class="mobile-ink-dot" data-mobile-color-dot aria-hidden="true"></span>
+          </span>
+          <span data-mobile-tool-label>Marker</span>
+          <span
+            class="mobile-fade-badge"
+            data-mobile-fade-badge
+            aria-hidden="true"
+            hidden
+            title="Fade ink enabled"
+          >
+            <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 7v5l3 2"></path>
+              <path d="M20 12a8 8 0 1 1-4.3-7.1"></path>
+              <path d="M20 4v5h-5"></path>
+            </svg>
+          </span>
+        </button>
+
+        <button
+          type="button"
+          class="mobile-undo-button"
+          data-board-control="quick-undo"
+          aria-label="Undo"
+          title="Undo"
+        >
+          <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M9 14l-5-5 5-5"></path>
+            <path d="M4 9h10a6 6 0 0 1 0 12h-2"></path>
+          </svg>
+        </button>
+      </div>
+
+      <aside id="presenter-toolbar" class="toolbar" aria-label="Presenter controls">
+        <div class="toolbar-brand">
+          <span class="toolbar-logo" aria-hidden="true">O</span>
+          <span class="toolbar-status" data-board-session aria-live="polite">Relay</span>
+          <button
+            type="button"
+            class="toolbar-close-button"
+            data-board-control="toolbar-close"
+            aria-label="Minimize toolbar"
+            title="Minimize"
+          >
+            <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6 6l12 12"></path>
+              <path d="M18 6L6 18"></path>
+            </svg>
+          </button>
+        </div>
+
+        <label class="toolbar-field surface-field">
+          <span class="control-label">Surface</span>
+          <span class="surface-select-shell">
+            <span class="surface-dot" aria-hidden="true"></span>
+            <span class="surface-current" data-surface-label>White</span>
+            <select name="surface" data-board-control="surface" aria-label="Board surface">
+              <option value="whiteboard">White</option>
+              <option value="blueboard">Blue</option>
+              <option value="blackboard">Black</option>
+              <option value="greenboard">Green</option>
+            </select>
+            <svg class="chevron-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M7 10l5 5 5-5"></path>
+            </svg>
+          </span>
         </label>
-        <button type="button" data-board-control="pen" aria-pressed="true">Marker</button>
-        <button type="button" data-board-control="eraser" aria-pressed="false">Eraser</button>
-        <button type="button" data-board-control="pointer" aria-pressed="false">Pointer</button>
-        <label class="toolbar-toggle">
-          <input type="checkbox" data-board-control="ephemeral">
-          Ephemeral
-        </label>
-        <button type="button" class="danger-button" data-board-control="clear">Clear all</button>
-        <span class="toolbar-field" data-board-session aria-live="polite"></span>
-      </section>
+
+        <div class="toolbar-group" aria-label="Drawing tools">
+          <button type="button" class="tool-row" data-board-control="pen" aria-pressed="true" title="Pen">
+            <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 20l4.4-1 9.9-9.9-3.4-3.4L5 15.6 4 20z"></path>
+              <path d="M13.7 6.9l3.4 3.4"></path>
+              <path d="M15.4 5.2l1.3-1.3a1.6 1.6 0 0 1 2.3 0l1.1 1.1a1.6 1.6 0 0 1 0 2.3l-1.3 1.3"></path>
+            </svg>
+            <span data-tool-label>Marker</span>
+          </button>
+
+          <button type="button" class="tool-row" data-board-control="eraser" aria-pressed="false" title="Eraser">
+            <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4.6 15.8l8.8-8.8a2 2 0 0 1 2.8 0l3 3a2 2 0 0 1 0 2.8l-6.5 6.5H7.1l-2.5-2.5a1.4 1.4 0 0 1 0-2z"></path>
+              <path d="M10.8 9.6l5.6 5.6"></path>
+              <path d="M12.7 19.3H21"></path>
+            </svg>
+            <span>Eraser</span>
+          </button>
+
+          <button type="button" class="tool-row" data-board-control="pointer" aria-pressed="false" title="Pointer">
+            <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 3l14 8-6.2 1.5L10 19 5 3z"></path>
+              <path d="M12.8 12.5l4 5"></path>
+            </svg>
+            <span>Pointer</span>
+          </button>
+        </div>
+
+        <div class="toolbar-group" aria-label="Stroke options">
+          <div class="toolbar-section" aria-label="Ink color">
+            <span class="control-label">Color</span>
+            <div class="color-swatches">
+              <button type="button" class="color-swatch" data-board-control="color" data-color-index="0" aria-label="Color 1"></button>
+              <button type="button" class="color-swatch" data-board-control="color" data-color-index="1" aria-label="Color 2"></button>
+              <button type="button" class="color-swatch" data-board-control="color" data-color-index="2" aria-label="Color 3"></button>
+              <button type="button" class="color-swatch" data-board-control="color" data-color-index="3" aria-label="Color 4"></button>
+            </div>
+          </div>
+
+          <div class="toolbar-section" aria-label="Tool sizes">
+            <label class="range-field">
+              <span class="range-label">Tip <output data-board-output="tip-size">6</output></span>
+              <input type="range" min="2" max="16" step="1" value="6" data-board-control="tip-size" aria-label="Tip size">
+            </label>
+
+            <label class="range-field">
+              <span class="range-label">Erase <output data-board-output="eraser-size">18</output></span>
+              <input type="range" min="8" max="48" step="2" value="18" data-board-control="eraser-size" aria-label="Eraser size">
+            </label>
+          </div>
+
+          <label class="tool-row toggle-button" title="Ephemeral ink">
+            <input class="sr-only" type="checkbox" data-board-control="ephemeral">
+            <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 7v5l3 2"></path>
+              <path d="M20 12a8 8 0 1 1-4.3-7.1"></path>
+              <path d="M20 4v5h-5"></path>
+            </svg>
+            <span>Fade</span>
+          </label>
+        </div>
+
+        <div id="presenter-share-panel" class="toolbar-more-panel" data-board-share-panel hidden>
+          <span class="control-label">Viewer link</span>
+          <div class="board-share-qr-shell" data-board-share-qr></div>
+          <input
+            type="text"
+            readonly
+            value="/viewer"
+            data-board-share-input
+            aria-label="Viewer URL"
+          >
+          <div class="toolbar-more-actions">
+            <a href="/viewer" data-board-share-link>Open</a>
+            <button type="button" data-board-control="copy-viewer">Copy</button>
+          </div>
+        </div>
+
+        <div class="toolbar-bottom">
+          <button type="button" class="tool-row" data-board-control="undo" title="Undo">
+            <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9 14l-5-5 5-5"></path>
+              <path d="M4 9h10a6 6 0 0 1 0 12h-2"></path>
+            </svg>
+            <span>Undo</span>
+          </button>
+
+          <button
+            type="button"
+            class="tool-row"
+            data-board-control="more"
+            aria-expanded="false"
+            aria-controls="presenter-share-panel"
+            title="More"
+          >
+            <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"></path>
+              <path d="M19 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"></path>
+              <path d="M5 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"></path>
+            </svg>
+            <span>More</span>
+          </button>
+
+          <button type="button" class="tool-row danger-button" data-board-control="clear" title="Clear all">
+            <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 7h16"></path>
+              <path d="M9 7V5h6v2"></path>
+              <path d="M7 7l1 13h8l1-13"></path>
+              <path d="M10 11v5"></path>
+              <path d="M14 11v5"></path>
+            </svg>
+            <span data-clear-label>Clear</span>
+          </button>
+        </div>
+      </aside>
       <canvas id="board-canvas" class="board-canvas" data-board-canvas></canvas>
     </main>
     <script type="module" src="/board/board.js"></script>

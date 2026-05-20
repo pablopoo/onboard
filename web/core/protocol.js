@@ -5,6 +5,8 @@ const EVENT_TYPES = new Set([
   "stroke:end",
   "stroke:expire",
   "board:clear",
+  "board:undo",
+  "board:restore",
   "pointer:show",
   "pointer:move",
   "pointer:hide",
@@ -81,8 +83,16 @@ export function validateBoardEvent(event) {
     return validateStrokePointPayload(event.payload);
   }
 
-  if (event.type === "stroke:end" || event.type === "stroke:expire") {
+  if (
+    event.type === "stroke:end" ||
+    event.type === "stroke:expire" ||
+    event.type === "board:undo"
+  ) {
     return validateStrokeIdPayload(event.payload);
+  }
+
+  if (event.type === "board:restore") {
+    return validateRestorePayload(event.payload);
   }
 
   if (event.type === "pointer:show" || event.type === "pointer:move") {
@@ -185,6 +195,110 @@ function validateStrokeIdPayload(payload) {
   }
 
   return { valid: true };
+}
+
+function validateRestorePayload(payload) {
+  const surfaceResult = validateSurfacePayload(payload);
+  if (!surfaceResult.valid) {
+    return surfaceResult;
+  }
+
+  if (!Array.isArray(payload.strokes)) {
+    return invalid("strokes must be an array");
+  }
+
+  for (const stroke of payload.strokes) {
+    const strokeResult = validateRestoredStroke(stroke);
+    if (!strokeResult.valid) {
+      return strokeResult;
+    }
+  }
+
+  return validatePointerSnapshot(payload.pointer);
+}
+
+function validateRestoredStroke(stroke) {
+  if (!isPlainObject(stroke)) {
+    return invalid("stroke must be an object");
+  }
+
+  const strokeIdResult = validateStrokeIdPayload(stroke);
+  if (!strokeIdResult.valid) {
+    return strokeIdResult;
+  }
+
+  if (!SURFACES.has(stroke.surface)) {
+    return invalid("invalid stroke surface");
+  }
+
+  if (!isToolAllowedForSurface(stroke.tool, stroke.surface)) {
+    return invalid("tool is not allowed for stroke surface");
+  }
+
+  if (!isNonEmptyString(stroke.color)) {
+    return invalid("missing stroke color");
+  }
+
+  if (
+    !Number.isFinite(stroke.width) ||
+    stroke.width <= 0 ||
+    stroke.width > MAX_STROKE_WIDTH
+  ) {
+    return invalid("missing stroke width");
+  }
+
+  if (!Array.isArray(stroke.points) || stroke.points.length === 0) {
+    return invalid("stroke points must be a non-empty array");
+  }
+
+  for (const point of stroke.points) {
+    const pointResult = validatePointPayload({ point });
+    if (!pointResult.valid) {
+      return pointResult;
+    }
+  }
+
+  if (typeof stroke.complete !== "boolean") {
+    return invalid("stroke complete must be boolean");
+  }
+
+  if (hasOwn(stroke, "ephemeral") && typeof stroke.ephemeral !== "boolean") {
+    return invalid("invalid stroke ephemeral");
+  }
+
+  if (stroke.ephemeral === true && !Number.isFinite(stroke.expiresAt)) {
+    return invalid("ephemeral strokes require numeric expiresAt");
+  }
+
+  if (stroke.ephemeral !== true && hasOwn(stroke, "expiresAt")) {
+    return invalid("expiresAt requires ephemeral true");
+  }
+
+  if (hasOwn(stroke, "expiresAt") && !Number.isFinite(stroke.expiresAt)) {
+    return invalid("invalid stroke expiresAt");
+  }
+
+  return { valid: true };
+}
+
+function validatePointerSnapshot(pointer) {
+  if (!isPlainObject(pointer)) {
+    return invalid("pointer must be an object");
+  }
+
+  if (typeof pointer.visible !== "boolean") {
+    return invalid("pointer visible must be boolean");
+  }
+
+  if (pointer.visible === false) {
+    if (pointer.point !== null) {
+      return invalid("hidden pointer point must be null");
+    }
+
+    return { valid: true };
+  }
+
+  return validatePointPayload(pointer);
 }
 
 function validatePointPayload(payload) {

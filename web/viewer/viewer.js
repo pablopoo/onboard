@@ -13,10 +13,13 @@ import { createWebSocketRelayTransport } from "../transports/websocket-relay-tra
 
 const VIEWER_READY_SIGNAL_PAYLOAD = { onboardViewerReady: true };
 
-export function createRelayURL(location) {
+export function createRelayURL(location, role = "") {
   const base = `${location.protocol}//${location.host}`;
   const url = new URL("/ws/relay", base);
   url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  if (role) {
+    url.searchParams.set("role", role);
+  }
   return url.href;
 }
 
@@ -38,6 +41,8 @@ export function createViewerController({
   renderBoardState = defaultRenderBoardState,
   resizeCanvasToDisplaySize = defaultResizeCanvasToDisplaySize,
   ResizeObserverImpl = globalThis.ResizeObserver,
+  setTimeout: setTimer = globalThis.setTimeout?.bind(globalThis),
+  clearTimeout: clearTimer = globalThis.clearTimeout?.bind(globalThis),
   window = globalThis.window,
 } = {}) {
   if (!elements?.canvas) {
@@ -53,12 +58,18 @@ export function createViewerController({
   let connectionState = "idle";
   let connectionPromise = null;
   let connectionGeneration = 0;
+  let pendingRenderFrame = null;
+  let ephemeralRenderTimer = null;
   let closed = false;
 
   const unsubscribe = transport.onEvent((event) => {
     applyBoardEvent(state, event);
-    render();
+    scheduleRender();
   });
+  const unsubscribeStatus =
+    typeof transport.onStatus === "function"
+      ? transport.onStatus(handleTransportStatus)
+      : () => {};
   const cleanupResizeRendering = setupResizeRendering();
 
   render();
@@ -76,7 +87,10 @@ export function createViewerController({
       closed = true;
       connectionGeneration += 1;
       unsubscribe();
+      unsubscribeStatus();
       cleanupResizeRendering();
+      cancelScheduledRender();
+      clearEphemeralRenderTimer();
       connectionState = "closed";
       connectionPromise = null;
       updateStatus("Disconnected");
@@ -128,21 +142,125 @@ export function createViewerController({
     return connectionPromise;
   }
 
+  function handleTransportStatus(status) {
+    if (closed) {
+      return;
+    }
+
+    if (status === "connecting") {
+      connectionState = "connecting";
+      updateStatus("Connecting");
+      return;
+    }
+
+    if (status === "reconnecting") {
+      connectionState = "connecting";
+      connectionPromise = null;
+      updateStatus("Reconnecting");
+      return;
+    }
+
+    if (status === "connected") {
+      connectionState = "open";
+      connectionPromise = null;
+      updateStatus("Connected");
+      return;
+    }
+
+    if (status === "disconnected" || status === "closed") {
+      connectionState = "failed";
+      connectionPromise = null;
+      updateStatus("Disconnected");
+    }
+  }
+
   function render() {
+    pendingRenderFrame = null;
     if (closed) {
       return;
     }
 
     resizeCanvasToDisplaySize(canvas);
+    const renderNow = now();
+    const snapshot = snapshotBoardState(state);
     renderBoardState(
       ctx,
-      snapshotBoardState(state),
+      snapshot,
       {
         width: canvas.width,
         height: canvas.height,
       },
-      { now: now() },
+      { now: renderNow },
     );
+    scheduleNextEphemeralRender(snapshot, renderNow);
+  }
+
+  function scheduleRender() {
+    if (closed) {
+      return;
+    }
+
+    if (
+      window &&
+      typeof window.requestAnimationFrame === "function" &&
+      typeof window.cancelAnimationFrame === "function"
+    ) {
+      if (pendingRenderFrame !== null) {
+        return;
+      }
+
+      pendingRenderFrame = window.requestAnimationFrame(render);
+      return;
+    }
+
+    render();
+  }
+
+  function cancelScheduledRender() {
+    if (
+      pendingRenderFrame !== null &&
+      window &&
+      typeof window.cancelAnimationFrame === "function"
+    ) {
+      window.cancelAnimationFrame(pendingRenderFrame);
+    }
+    pendingRenderFrame = null;
+  }
+
+  function scheduleNextEphemeralRender(snapshot, currentNow) {
+    clearEphemeralRenderTimer();
+
+    if (closed || typeof setTimer !== "function") {
+      return;
+    }
+
+    let nextExpiresAt = Number.POSITIVE_INFINITY;
+    for (const stroke of snapshot.strokes) {
+      if (
+        stroke.ephemeral === true &&
+        Number.isFinite(stroke.expiresAt) &&
+        stroke.expiresAt > currentNow &&
+        stroke.expiresAt < nextExpiresAt
+      ) {
+        nextExpiresAt = stroke.expiresAt;
+      }
+    }
+
+    if (!Number.isFinite(nextExpiresAt)) {
+      return;
+    }
+
+    ephemeralRenderTimer = setTimer(() => {
+      ephemeralRenderTimer = null;
+      scheduleRender();
+    }, Math.max(0, nextExpiresAt - currentNow));
+  }
+
+  function clearEphemeralRenderTimer() {
+    if (ephemeralRenderTimer !== null) {
+      clearTimer?.(ephemeralRenderTimer);
+      ephemeralRenderTimer = null;
+    }
   }
 
   function updateStatus(message) {
@@ -215,9 +333,10 @@ export function createViewerApp({
           createWebRTCTransport,
           sessionId: sessionIdForLocation(location),
           peerId: createPeerIdImpl("viewer"),
+          reportError,
         })
       : createRelayTransport({
-          url: createRelayURL(location),
+          url: createRelayURL(location, "viewer"),
           WebSocketImpl,
         });
   const controller = createViewerController({
@@ -243,14 +362,19 @@ function createViewerWebRTCSetupTransport({
   createWebRTCTransport,
   sessionId,
   peerId,
+  reportError,
 }) {
   const handlers = new Set();
+  const statusHandlers = new Set();
   const realUnsubscribers = new Map();
   const pendingRejects = new Set();
   let signaling = null;
   let realTransport = null;
+  let unsubscribeRealStatus = null;
   let connectPromise = null;
+  let reconnectPromise = null;
   let closed = false;
+  let lastStatus = null;
 
   return {
     connect() {
@@ -294,6 +418,13 @@ function createViewerWebRTCSetupTransport({
         realUnsubscribers.delete(handler);
       };
     },
+    onStatus(handler) {
+      statusHandlers.add(handler);
+
+      return () => {
+        statusHandlers.delete(handler);
+      };
+    },
     close() {
       if (closed) {
         return;
@@ -306,6 +437,7 @@ function createViewerWebRTCSetupTransport({
   };
 
   async function connectWebRTC() {
+    emitStatus("connecting");
     signaling = createSignalingClientImpl({
       url: createSignalURL(location),
       WebSocketImpl,
@@ -325,14 +457,20 @@ function createViewerWebRTCSetupTransport({
     await sessionJoined;
     throwIfClosed();
 
+    await connectRealTransport();
+  }
+
+  async function connectRealTransport() {
     realTransport = createWebRTCTransport({
       signaling,
       role: "viewer",
       sessionId,
       peerId,
       RTCPeerConnectionImpl,
+      closeSignalingOnClose: false,
     });
     attachHandlers();
+    attachStatusHandler();
     const realConnection = realTransport.connect();
     signaling.sendSignal({
       type: "ice",
@@ -341,6 +479,7 @@ function createViewerWebRTCSetupTransport({
       payload: VIEWER_READY_SIGNAL_PAYLOAD,
     });
     await realConnection;
+    emitStatus("connected");
   }
 
   function waitForSignalingMessage(predicate) {
@@ -380,6 +519,27 @@ function createViewerWebRTCSetupTransport({
     }
   }
 
+  function attachStatusHandler() {
+    if (
+      unsubscribeRealStatus ||
+      !realTransport ||
+      typeof realTransport.onStatus !== "function"
+    ) {
+      return;
+    }
+
+    unsubscribeRealStatus = realTransport.onStatus(handleRealTransportStatus);
+  }
+
+  function handleRealTransportStatus(status) {
+    if (status === "disconnected" || status === "closed") {
+      startReconnect();
+      return;
+    }
+
+    emitStatus(status);
+  }
+
   function attachHandler(handler) {
     if (!realTransport || realUnsubscribers.has(handler)) {
       return;
@@ -396,22 +556,65 @@ function createViewerWebRTCSetupTransport({
   }
 
   function closeResources() {
+    reconnectPromise = null;
+    cleanupRealTransport();
+
+    signaling?.close();
+    signaling = null;
+  }
+
+  function cleanupRealTransport({ close = true } = {}) {
+    unsubscribeRealStatus?.();
+    unsubscribeRealStatus = null;
+
     for (const unsubscribe of realUnsubscribers.values()) {
       unsubscribe();
     }
     realUnsubscribers.clear();
 
-    realTransport?.close();
+    if (close) {
+      realTransport?.close();
+    }
     realTransport = null;
-
-    signaling?.close();
-    signaling = null;
   }
 
   function throwIfClosed() {
     if (closed) {
       throw new Error("WebRTC viewer transport is closed");
     }
+  }
+
+  function emitStatus(status) {
+    if (status === lastStatus) {
+      return;
+    }
+
+    lastStatus = status;
+    for (const handler of statusHandlers) {
+      handler(status);
+    }
+  }
+
+  function startReconnect() {
+    if (closed || reconnectPromise || !signaling) {
+      return;
+    }
+
+    emitStatus("reconnecting");
+    cleanupRealTransport({ close: false });
+
+    reconnectPromise = connectRealTransport()
+      .catch((error) => {
+        if (!closed) {
+          emitStatus("disconnected");
+          reportError?.(error);
+        }
+        throw error;
+      })
+      .catch(() => {})
+      .finally(() => {
+        reconnectPromise = null;
+      });
   }
 }
 

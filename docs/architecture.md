@@ -85,10 +85,18 @@ onboard/
       board-state.test.mjs
       canvas-renderer.js
       canvas-renderer.test.mjs
+      clipboard.js
+      clipboard.test.mjs
+      qr.js
+      qr.test.mjs
 
     board/
       board.js
       board.test.mjs
+
+    home/
+      home.js
+      home.test.mjs
 
     viewer/
       viewer.js
@@ -136,6 +144,7 @@ Directory responsibilities:
 - `internal/hub`: Approach 1 local relay state and broadcast.
 - `internal/signaling`: Approach 3 session pairing and WebRTC signaling.
 - `web/core`: shared browser-side product logic.
+- `web/home`: home-page share-link, copy, and QR behavior.
 - `web/transports`: event movement adapters.
 - `web/board`: Board presenter controller.
 - `web/viewer`: Viewer content-only controller.
@@ -206,6 +215,23 @@ The eraser is modeled as a drawing tool in the event stream, not as a viewer
 control. Clear all is modeled as `board:clear`. The pointer is separate from
 drawing and must not create strokes.
 
+## Presenter Controls
+
+The Board uses a floating left toolbar on desktop and tablet-sized viewports.
+The active tool highlight is neutral charcoal, never the active surface color,
+so green/blue/black/white remain board-surface signals only.
+
+On phone-sized viewports, the Board starts with a compact bottom dock. The dock
+shows the active drawing mode, current surface color, current ink color when
+drawing, fade state, and quick undo. Expanding it opens the full presenter
+toolbar as a bottom sheet with an explicit minimize control. Compact tool
+choices and drawing input collapse the toolbar again so the writing surface
+stays clear.
+
+Mobile controls should keep touch targets at roughly 44 CSS pixels or larger.
+Detailed settings like tip size, eraser size, share link, and destructive clear
+belong in the expanded toolbar rather than the compact dock.
+
 ## Viewer Contract
 
 The Viewer is content-only. It shows:
@@ -250,6 +276,8 @@ The build script is `scripts/build-release.sh`; its shell check is
 - Touch drawing can accidentally scroll the page.
 - Canvas sizes must match cleanly between board and viewer.
 - Different device pixel ratios can make strokes blurry or offset.
-- WebSocket reconnects need simple behavior before real use.
-- WebRTC connection setup needs clear pairing and failure states.
+- Reconnect behavior must remain simple and visible when a browser, socket, or
+  data channel drops.
+- WebRTC signaling errors must fail fast instead of leaving pairing or reconnect
+  flows waiting forever.
 - Viewer must never show board controls.

@@ -9,9 +9,12 @@ import {
   snapshotBoardState,
 } from "../core/board-state.js";
 import {
+  boardViewportForSize,
   renderBoardState as defaultRenderBoardState,
   resizeCanvasToDisplaySize as defaultResizeCanvasToDisplaySize,
 } from "../core/canvas-renderer.js";
+import { copyText as defaultCopyText } from "../core/clipboard.js";
+import { createShareQRCodeElement } from "../core/qr.js";
 import { createSignalingClient } from "../transports/signaling-client.js";
 import { createWebRTCDataChannelTransport } from "../transports/webrtc-datachannel-transport.js";
 import { createWebSocketRelayTransport } from "../transports/websocket-relay-transport.js";
@@ -34,28 +37,75 @@ const SURFACE_LABELS = {
   blackboard: "Blackboard",
   greenboard: "Greenboard",
 };
+const SURFACE_SHORT_LABELS = {
+  whiteboard: "White",
+  blueboard: "Blue",
+  blackboard: "Black",
+  greenboard: "Green",
+};
+const SURFACE_COLORS = {
+  whiteboard: "#f8fafc",
+  blueboard: "#174a7c",
+  blackboard: "#1f2521",
+  greenboard: "#22543d",
+};
+const COLOR_OPTIONS_BY_SURFACE = {
+  whiteboard: [
+    { label: "Black marker", color: "#111827" },
+    { label: "Blue marker", color: "#1d4ed8" },
+    { label: "Red marker", color: "#dc2626" },
+    { label: "Green marker", color: "#15803d" },
+  ],
+  blueboard: [
+    { label: "White marker", color: "#f8fafc" },
+    { label: "Yellow marker", color: "#facc15" },
+    { label: "Cyan marker", color: "#67e8f9" },
+    { label: "Pink marker", color: "#f9a8d4" },
+  ],
+  blackboard: [
+    { label: "White chalk", color: "#f8fafc" },
+    { label: "Yellow chalk", color: "#f8e08e" },
+    { label: "Rose chalk", color: "#f5b6c8" },
+    { label: "Blue chalk", color: "#b7d7f0" },
+  ],
+  greenboard: [
+    { label: "White chalk", color: "#f8fafc" },
+    { label: "Yellow chalk", color: "#f8e08e" },
+    { label: "Rose chalk", color: "#f5b6c8" },
+    { label: "Blue chalk", color: "#b7d7f0" },
+  ],
+};
 const TOOL_LABELS = {
   marker: "Marker",
   chalk: "Chalk",
   eraser: "Eraser",
   pointer: "Pointer",
 };
-const PEN_STYLES = {
-  whiteboard: { color: "#111827", width: 5 },
-  blueboard: { color: "#f8fafc", width: 5 },
-  blackboard: { color: "#f8fafc", width: 6 },
-  greenboard: { color: "#f8fafc", width: 6 },
-};
 const ERASER_STYLE = { color: "#000000", width: 18 };
+const DEFAULT_TIP_WIDTH = 6;
+const TIP_WIDTH_RANGE = { min: 2, max: 16 };
+const ERASER_WIDTH_RANGE = { min: 8, max: 48 };
 const EPHEMERAL_DELAY_MS = 4_000;
+const CLEAR_CONFIRM_MS = 3_000;
 const VIEWER_READY_SIGNAL_PAYLOAD = { onboardViewerReady: true };
+const FINAL_POINT_EPSILON = 0.000001;
+const SESSION_STATUS_LABELS = {
+  "Relay connecting": "Connecting",
+  "Relay connected": "Relay",
+  "Relay reconnecting": "Reconnecting",
+  "Relay disconnected": "Offline",
+  "Input paused": "Paused",
+};
 
 let nextStrokeNumber = 1;
 
-export function createRelayURL(location) {
+export function createRelayURL(location, role = "") {
   const base = `${location.protocol}//${location.host}`;
   const url = new URL("/ws/relay", base);
   url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  if (role) {
+    url.searchParams.set("role", role);
+  }
   return url.href;
 }
 
@@ -80,6 +130,12 @@ export function createBoardController({
   reportError = defaultReportError,
   renderBoardState = defaultRenderBoardState,
   resizeCanvasToDisplaySize = defaultResizeCanvasToDisplaySize,
+  ResizeObserverImpl = globalThis.ResizeObserver,
+  window = globalThis.window,
+  maxQueuedEvents = 1_000,
+  manageSessionStatus = true,
+  viewerURL = "/viewer",
+  copyText = defaultCopyText,
 } = {}) {
   if (!elements?.canvas) {
     throw new TypeError("board controller requires a canvas element");
@@ -92,22 +148,68 @@ export function createBoardController({
   const ctx = canvas.getContext("2d");
   const state = createBoardState();
   const expirationTimers = new Map();
+  let clearConfirmTimer = null;
+  let clearArmed = false;
   let mode = "draw";
   let ephemeralEnabled = Boolean(elements.ephemeralToggle?.checked);
+  let tipWidth = clampNumber(
+    elements.tipSizeInput?.value,
+    TIP_WIDTH_RANGE.min,
+    TIP_WIDTH_RANGE.max,
+    DEFAULT_TIP_WIDTH,
+  );
+  let eraserWidth = clampNumber(
+    elements.eraserSizeInput?.value,
+    ERASER_WIDTH_RANGE.min,
+    ERASER_WIDTH_RANGE.max,
+    ERASER_STYLE.width,
+  );
+  const selectedColors = new Map(
+    Array.from(SURFACES, (surface) => [
+      surface,
+      colorOptionsForSurface(surface)[0].color,
+    ]),
+  );
   let activeStroke = null;
   let activePointerId = null;
   let connectionState = "idle";
   let connectionPromise = null;
+  let connectionGeneration = 0;
+  let relayViewerCount = null;
+  let morePanelExpanded = false;
+  let currentViewerURL = viewerURL;
+  let pendingRenderFrame = null;
+  let presenterLocked = false;
+  let closed = false;
   let nextEventNumber = 1;
+  let compactViewport = isCompactMobileViewport();
+  let toolbarExpanded = !compactViewport;
   const eventSessionId = createEventSessionId();
   const queuedEvents = [];
+  const undoStack = [];
 
   const unsubscribe = transport.onEvent((event) => {
+    if (event?.type === "system:presenter-conflict") {
+      lockPresenterControls();
+      return;
+    }
+    if (event?.type === "system:relay-presence") {
+      handleRelayPresence(event);
+      return;
+    }
+
     applyBoardEvent(state, event);
-    render();
+    scheduleRender();
     updateControls();
   });
+  const unsubscribeStatus =
+    typeof transport.onStatus === "function"
+      ? transport.onStatus(handleTransportStatus)
+      : () => {};
+  const cleanupResizeRendering = setupResizeRendering();
 
+  updateViewerShareElements(elements, currentViewerURL);
+  updateMorePanel();
   bindControls();
   render();
   updateControls();
@@ -117,17 +219,31 @@ export function createBoardController({
       return connectTransport();
     },
     close() {
-      unsubscribe();
-      for (const timer of expirationTimers.values()) {
-        clearTimer?.(timer);
+      if (closed) {
+        return;
       }
-      expirationTimers.clear();
+
+      closed = true;
+      connectionGeneration += 1;
+      unsubscribe();
+      unsubscribeStatus();
+      cleanupResizeRendering();
+      clearExpirationTimers();
+      resetClearConfirmation();
+      cancelScheduledRender();
       connectionState = "closed";
       connectionPromise = null;
+      queuedEvents.length = 0;
+      setSessionStatus("Relay disconnected");
       transport.close();
     },
     getSnapshot() {
       return snapshotBoardState(state);
+    },
+    setViewerURL(url) {
+      currentViewerURL = String(url ?? "");
+      updateViewerShareElements(elements, currentViewerURL);
+      updateControls();
     },
   };
 
@@ -136,11 +252,23 @@ export function createBoardController({
     elements.penButton?.addEventListener("click", () => setMode("draw"));
     elements.eraserButton?.addEventListener("click", () => setMode("eraser"));
     elements.pointerButton?.addEventListener("click", () => setMode("pointer"));
+    for (const colorButton of elements.colorButtons ?? []) {
+      colorButton.addEventListener("click", handleColorChange);
+    }
+    elements.tipSizeInput?.addEventListener("input", handleTipSizeChange);
+    elements.eraserSizeInput?.addEventListener("input", handleEraserSizeChange);
     elements.ephemeralToggle?.addEventListener("change", () => {
       ephemeralEnabled = Boolean(elements.ephemeralToggle.checked);
+      collapseToolbarAfterCompactChoice();
       updateControls();
     });
     elements.clearButton?.addEventListener("click", handleClear);
+    elements.undoButton?.addEventListener("click", handleUndo);
+    elements.quickUndoButton?.addEventListener("click", handleUndo);
+    elements.moreButton?.addEventListener("click", handleMoreToggle);
+    elements.copyViewerButton?.addEventListener("click", handleCopyViewerLink);
+    elements.toolbarToggleButton?.addEventListener("click", handleToolbarToggle);
+    elements.toolbarCloseButton?.addEventListener("click", handleToolbarClose);
 
     canvas.addEventListener("pointerdown", handlePointerDown);
     canvas.addEventListener("pointermove", handlePointerMove);
@@ -151,35 +279,183 @@ export function createBoardController({
 
   function handleSurfaceChange(event) {
     event.preventDefault?.();
+    if (presenterLocked) {
+      return;
+    }
+
     const surface = surfaceName(elements.surfaceSelect.value);
     publish("board:set-surface", { surface });
+    collapseToolbarAfterCompactChoice();
+    updateControls();
+  }
+
+  function handleColorChange(event) {
+    event.preventDefault?.();
+    if (presenterLocked) {
+      return;
+    }
+
+    const index = Number(event.currentTarget?.dataset?.colorIndex);
+    const colorOption = colorOptionsForSurface(state.surface)[index];
+    if (!colorOption) {
+      return;
+    }
+
+    selectedColors.set(state.surface, colorOption.color);
+    collapseToolbarAfterCompactChoice();
+    updateControls();
+  }
+
+  function handleTipSizeChange(event) {
+    event.preventDefault?.();
+    if (presenterLocked) {
+      return;
+    }
+
+    tipWidth = clampNumber(
+      elements.tipSizeInput.value,
+      TIP_WIDTH_RANGE.min,
+      TIP_WIDTH_RANGE.max,
+      DEFAULT_TIP_WIDTH,
+    );
+    updateControls();
+  }
+
+  function handleEraserSizeChange(event) {
+    event.preventDefault?.();
+    if (presenterLocked) {
+      return;
+    }
+
+    eraserWidth = clampNumber(
+      elements.eraserSizeInput.value,
+      ERASER_WIDTH_RANGE.min,
+      ERASER_WIDTH_RANGE.max,
+      ERASER_STYLE.width,
+    );
     updateControls();
   }
 
   function handleClear(event) {
     event.preventDefault?.();
-    publish("board:clear", {});
+    if (presenterLocked) {
+      return;
+    }
+
+    const snapshot = snapshotBoardState(state);
+    if (snapshot.strokes.length === 0 && !snapshot.pointer.visible) {
+      resetClearConfirmation();
+      return;
+    }
+
+    if (!clearArmed) {
+      armClearConfirmation();
+      return;
+    }
+
+    resetClearConfirmation();
+    if (publish("board:clear", {})) {
+      undoStack.push({ type: "restore", snapshot });
+      clearExpirationTimers();
+      updateControls();
+    }
+  }
+
+  function handleToolbarToggle(event) {
+    event.preventDefault?.();
+    if (presenterLocked) {
+      return;
+    }
+
+    setToolbarExpanded(!toolbarExpanded);
+  }
+
+  function handleToolbarClose(event) {
+    event.preventDefault?.();
+    setToolbarExpanded(false);
+  }
+
+  function handleMoreToggle(event) {
+    event.preventDefault?.();
+    if (presenterLocked) {
+      return;
+    }
+
+    morePanelExpanded = !morePanelExpanded;
+    updateMorePanel();
+  }
+
+  async function handleCopyViewerLink(event) {
+    event.preventDefault?.();
+    if (presenterLocked || !currentViewerURL) {
+      return;
+    }
+
+    try {
+      await copyText(currentViewerURL);
+      setCopyViewerButtonLabel("Copied");
+    } catch (error) {
+      reportError(error);
+      setCopyViewerButtonLabel("Failed");
+    }
+    setTimer?.(() => {
+      setCopyViewerButtonLabel("Copy");
+    }, 1200);
+  }
+
+  function handleUndo(event) {
+    event.preventDefault?.();
+    if (presenterLocked) {
+      return;
+    }
+
+    const action = undoStack.pop();
+    if (!action) {
+      updateControls();
+      return;
+    }
+
+    if (action.type === "stroke") {
+      publish("board:undo", { strokeId: action.strokeId });
+      return;
+    }
+
+    if (action.type === "restore") {
+      publish("board:restore", action.snapshot);
+    }
   }
 
   function handlePointerDown(event) {
+    if (presenterLocked) {
+      return;
+    }
     if (event.button !== undefined && event.button !== 0) {
       return;
     }
 
     event.preventDefault?.();
+    resetClearConfirmation();
+    collapseToolbarForCanvasInput();
     canvas.setPointerCapture?.(event.pointerId);
 
     const point = pointFromEvent(event);
 
     if (mode === "pointer") {
-      activePointerId = event.pointerId;
-      publish("pointer:show", { point });
+      if (publish("pointer:show", { point })) {
+        activePointerId = event.pointerId;
+      } else {
+        canvas.releasePointerCapture?.(event.pointerId);
+      }
       return;
     }
 
     const surface = state.surface;
     const tool = currentTool(surface);
-    const style = styleForTool(tool, surface);
+    const style = styleForTool(tool, surface, {
+      color: selectedColorForSurface(surface),
+      tipWidth,
+      eraserWidth,
+    });
     const strokeId = nextStrokeId();
     const payload = {
       strokeId,
@@ -195,16 +471,26 @@ export function createBoardController({
       payload.expiresAt = now() + EPHEMERAL_DELAY_MS;
     }
 
+    const startEvent = publish("stroke:start", payload);
+    if (!startEvent) {
+      canvas.releasePointerCapture?.(event.pointerId);
+      return;
+    }
+
     activeStroke = {
       pointerId: event.pointerId,
       strokeId,
       ephemeral: ephemeralEnabled,
       expiresAt: payload.expiresAt,
+      lastPoint: point,
     };
-    publish("stroke:start", payload);
   }
 
   function handlePointerMove(event) {
+    if (presenterLocked) {
+      return;
+    }
+
     if (mode === "pointer") {
       if (activePointerId !== event.pointerId) {
         return;
@@ -219,13 +505,16 @@ export function createBoardController({
     }
 
     event.preventDefault?.();
-    publish("stroke:point", {
-      strokeId: activeStroke.strokeId,
-      point: pointFromEvent(event),
-    });
+    for (const sample of coalescedPointerEvents(event)) {
+      publishStrokePoint(activeStroke, pointFromEvent(sample));
+    }
   }
 
   function handlePointerEnd(event) {
+    if (presenterLocked) {
+      return;
+    }
+
     if (mode === "pointer") {
       if (activePointerId !== event.pointerId) {
         return;
@@ -243,12 +532,20 @@ export function createBoardController({
 
     event.preventDefault?.();
     const stroke = activeStroke;
+    publishFinalPointIfChanged(stroke, pointFromEvent(event));
     activeStroke = null;
     canvas.releasePointerCapture?.(event.pointerId);
-    publish("stroke:end", { strokeId: stroke.strokeId });
+    const endEvent = publish("stroke:end", { strokeId: stroke.strokeId });
+    if (!endEvent) {
+      updateControls();
+      return;
+    }
 
     if (stroke.ephemeral) {
       scheduleExpiration(stroke.strokeId, stroke.expiresAt);
+    } else {
+      undoStack.push({ type: "stroke", strokeId: stroke.strokeId });
+      updateControls();
     }
   }
 
@@ -266,14 +563,88 @@ export function createBoardController({
     }
   }
 
+  function clearExpirationTimers() {
+    for (const timer of expirationTimers.values()) {
+      clearTimer?.(timer);
+    }
+    expirationTimers.clear();
+  }
+
+  function armClearConfirmation() {
+    resetClearConfirmation();
+    setClearConfirmation(true);
+    clearConfirmTimer = setTimer?.(() => {
+      clearConfirmTimer = null;
+      setClearConfirmation(false);
+    }, CLEAR_CONFIRM_MS);
+  }
+
+  function resetClearConfirmation() {
+    if (clearConfirmTimer !== null) {
+      clearTimer?.(clearConfirmTimer);
+      clearConfirmTimer = null;
+    }
+    setClearConfirmation(false);
+  }
+
+  function setClearConfirmation(armed) {
+    clearArmed = Boolean(armed);
+    elements.clearButton?.classList?.toggle("is-armed", clearArmed);
+    elements.clearButton?.setAttribute?.(
+      "aria-label",
+      clearArmed ? "Confirm clear all" : "Clear all",
+    );
+    if (elements.clearButton) {
+      elements.clearButton.title = clearArmed ? "Confirm clear all" : "Clear all";
+    }
+    setClearButtonLabel(clearArmed ? "Confirm" : "Clear");
+  }
+
+  function setClearButtonLabel(label) {
+    const labelElement = elements.clearButton?.querySelector?.(
+      "[data-clear-label]",
+    );
+    if (labelElement) {
+      labelElement.textContent = label;
+      return;
+    }
+
+    if (elements.clearButton) {
+      elements.clearButton.textContent = label;
+    }
+  }
+
   function publish(type, payload) {
+    if (presenterLocked) {
+      return null;
+    }
+    if (!canAcceptEvent()) {
+      return null;
+    }
+
     const event = createBoardEvent(type, payload, boardId);
     event.id = nextBoardEventId();
+    if (!deliverEvent(event)) {
+      return null;
+    }
+
     applyBoardEvent(state, event);
-    render();
+    scheduleRender();
     updateControls();
-    deliverEvent(event);
     return event;
+  }
+
+  function canAcceptEvent() {
+    if (connectionState === "open") {
+      return true;
+    }
+
+    if (queuedEvents.length < maxQueuedEvents) {
+      return true;
+    }
+
+    reportQueueFull();
+    return false;
   }
 
   function nextBoardEventId() {
@@ -286,6 +657,10 @@ export function createBoardController({
   }
 
   function connectTransport() {
+    if (closed) {
+      return Promise.reject(new Error("board controller is closed"));
+    }
+
     if (connectionState === "open") {
       return Promise.resolve();
     }
@@ -295,35 +670,112 @@ export function createBoardController({
     }
 
     connectionState = "connecting";
+    setSessionStatus("Relay connecting");
+    const generation = connectionGeneration + 1;
+    connectionGeneration = generation;
     connectionPromise = transport
       .connect()
       .then(() => {
+        if (closed || generation !== connectionGeneration) {
+          throw new Error("board controller is closed");
+        }
+
         connectionState = "open";
         flushQueuedEvents();
+        if (connectionState === "open") {
+          setConnectedSessionStatus();
+        }
       })
       .catch((error) => {
+        if (closed || generation !== connectionGeneration) {
+          throw new Error("board controller is closed");
+        }
+
         connectionState = "failed";
         connectionPromise = null;
+        setSessionStatus("Relay disconnected");
         throw error;
       });
 
     return connectionPromise;
   }
 
+  function handleTransportStatus(status) {
+    if (closed || presenterLocked) {
+      return;
+    }
+
+    if (status === "connecting") {
+      connectionState = "connecting";
+      setSessionStatus("Relay connecting");
+      return;
+    }
+
+    if (status === "reconnecting") {
+      connectionState = "connecting";
+      connectionPromise = null;
+      setSessionStatus("Relay reconnecting");
+      return;
+    }
+
+    if (status === "connected") {
+      connectionState = "open";
+      connectionPromise = null;
+      flushQueuedEvents();
+      syncExternallyManagedSnapshot();
+      if (connectionState === "open") {
+        setConnectedSessionStatus();
+      }
+      return;
+    }
+
+    if (status === "disconnected" || status === "closed") {
+      connectionState = "failed";
+      connectionPromise = null;
+      setSessionStatus("Relay disconnected");
+    }
+  }
+
   function deliverEvent(event) {
     if (connectionState !== "open") {
-      queuedEvents.push(event);
-      return;
+      return enqueueEvent(event);
     }
 
     try {
       transport.send(event);
+      return true;
     } catch (error) {
-      queuedEvents.push(event);
+      const queued = enqueueEvent(event);
       connectionState = "failed";
       connectionPromise = null;
+      setSessionStatus("Input paused");
       reportError(error);
+      return queued;
     }
+  }
+
+  function syncExternallyManagedSnapshot() {
+    if (manageSessionStatus || connectionState !== "open") {
+      return;
+    }
+
+    const event = createBoardEvent(
+      "board:restore",
+      snapshotBoardState(state),
+      boardId,
+    );
+    event.id = nextBoardEventId();
+    deliverEvent(event);
+  }
+
+  function enqueueEvent(event) {
+    if (queuedEvents.length >= maxQueuedEvents) {
+      reportQueueFull();
+      return false;
+    }
+
+    queuedEvents.push(event);
+    return true;
   }
 
   function flushQueuedEvents() {
@@ -336,12 +788,19 @@ export function createBoardController({
         queuedEvents.unshift(event);
         connectionState = "failed";
         connectionPromise = null;
+        setSessionStatus("Input paused");
         reportError(error);
       }
     }
   }
 
+  function reportQueueFull() {
+    setSessionStatus("Input paused");
+    reportError(new Error("Board event queue is full"));
+  }
+
   function render() {
+    pendingRenderFrame = null;
     resizeCanvasToDisplaySize(canvas);
     renderBoardState(ctx, snapshotBoardState(state), {
       width: canvas.width,
@@ -349,14 +808,74 @@ export function createBoardController({
     });
   }
 
+  function scheduleRender() {
+    if (
+      window &&
+      typeof window.requestAnimationFrame === "function" &&
+      typeof window.cancelAnimationFrame === "function"
+    ) {
+      if (pendingRenderFrame !== null) {
+        return;
+      }
+
+      pendingRenderFrame = window.requestAnimationFrame(render);
+      return;
+    }
+
+    render();
+  }
+
+  function cancelScheduledRender() {
+    if (
+      pendingRenderFrame !== null &&
+      window &&
+      typeof window.cancelAnimationFrame === "function"
+    ) {
+      window.cancelAnimationFrame(pendingRenderFrame);
+    }
+    pendingRenderFrame = null;
+  }
+
+  function setupResizeRendering() {
+    const cleanup = [];
+
+    if (typeof ResizeObserverImpl === "function") {
+      const observer = new ResizeObserverImpl(() => {
+        render();
+      });
+      observer.observe(canvas);
+      cleanup.push(() => {
+        observer.disconnect();
+      });
+    }
+
+    if (
+      window &&
+      typeof window.addEventListener === "function" &&
+      typeof window.removeEventListener === "function"
+    ) {
+      window.addEventListener("resize", handleWindowResize);
+      cleanup.push(() => {
+        window.removeEventListener("resize", handleWindowResize);
+      });
+    }
+
+    return () => {
+      for (const cleanupResize of cleanup) {
+        cleanupResize();
+      }
+    };
+  }
+
   function updateControls() {
     if (elements.surfaceSelect) {
       elements.surfaceSelect.value = state.surface;
+      setSurfaceIndicator(elements.surfaceSelect, state.surface);
     }
 
     const pen = compatiblePen(state.surface);
     if (elements.penButton) {
-      elements.penButton.textContent = TOOL_LABELS[pen];
+      setButtonLabel(elements.penButton, TOOL_LABELS[pen]);
       elements.penButton.title = `${TOOL_LABELS[pen]} for ${
         SURFACE_LABELS[state.surface]
       }`;
@@ -366,11 +885,144 @@ export function createBoardController({
     setPressed(elements.eraserButton, mode === "eraser");
     setPressed(elements.pointerButton, mode === "pointer");
     setPressed(elements.ephemeralToggle, ephemeralEnabled);
+    setPresenterControlsDisabled();
+    updateMorePanel();
+    updateColorControls();
+    updateSizeControls();
+    updateMobileToolbar();
   }
 
   function setMode(nextMode) {
+    if (presenterLocked) {
+      return;
+    }
     mode = nextMode;
+    collapseToolbarAfterCompactChoice();
     updateControls();
+  }
+
+  function setToolbarExpanded(expanded) {
+    toolbarExpanded = Boolean(expanded);
+    updateMobileToolbar();
+  }
+
+  function handleRelayPresence(event) {
+    const count = viewerCountFromPresenceEvent(event);
+    if (count === null) {
+      return;
+    }
+
+    relayViewerCount = count;
+    if (connectionState === "open") {
+      setConnectedSessionStatus();
+    }
+  }
+
+  function viewerCountFromPresenceEvent(event) {
+    const count = event?.payload?.viewerCount;
+    if (!Number.isFinite(count) || count < 0) {
+      return null;
+    }
+    return Math.floor(count);
+  }
+
+  function setConnectedSessionStatus() {
+    if (relayViewerCount === null) {
+      setSessionStatus("Relay connected");
+      return;
+    }
+
+    if (relayViewerCount === 0) {
+      setSessionStatus("No viewers connected", { label: "0 view" });
+      return;
+    }
+
+    if (relayViewerCount === 1) {
+      setSessionStatus("1 viewer connected", { label: "1 view" });
+      return;
+    }
+
+    setSessionStatus(`${relayViewerCount} viewers connected`, {
+      label: `${relayViewerCount} views`,
+    });
+  }
+
+  function handleWindowResize() {
+    render();
+    syncToolbarForViewport();
+  }
+
+  function syncToolbarForViewport() {
+    const nextCompactViewport = isCompactMobileViewport();
+    if (nextCompactViewport === compactViewport) {
+      return;
+    }
+
+    compactViewport = nextCompactViewport;
+    toolbarExpanded = !compactViewport;
+    updateMobileToolbar();
+  }
+
+  function collapseToolbarForCanvasInput() {
+    if (isCompactMobileViewport()) {
+      setToolbarExpanded(false);
+    }
+  }
+
+  function collapseToolbarAfterCompactChoice() {
+    if (isCompactMobileViewport()) {
+      toolbarExpanded = false;
+    }
+  }
+
+  function updateMobileToolbar() {
+    const surfaceColor =
+      SURFACE_COLORS[state.surface] ?? SURFACE_COLORS.whiteboard;
+    elements.root?.style?.setProperty?.("--surface-color", surfaceColor);
+    elements.root?.classList?.toggle("is-toolbar-collapsed", !toolbarExpanded);
+    elements.toolbarToggleButton?.setAttribute?.(
+      "aria-expanded",
+      String(toolbarExpanded),
+    );
+
+    const visibleMode = mode === "draw" ? "draw" : mode;
+    for (const icon of elements.mobileToolIcons ?? []) {
+      icon.hidden = icon.dataset?.mobileToolIcon !== visibleMode;
+    }
+
+    const label =
+      mode === "draw"
+        ? TOOL_LABELS[currentTool(state.surface)]
+        : TOOL_LABELS[mode];
+    setText(elements.mobileToolLabel, label);
+
+    if (elements.mobileColorDot) {
+      elements.mobileColorDot.hidden = mode !== "draw";
+      elements.mobileColorDot.style?.setProperty?.(
+        "--mobile-ink-color",
+        selectedColorForSurface(state.surface),
+      );
+      elements.mobileColorDot.setAttribute?.(
+        "aria-hidden",
+        String(mode !== "draw"),
+      );
+    }
+
+    if (elements.mobileFadeBadge) {
+      elements.mobileFadeBadge.hidden = !ephemeralEnabled;
+      elements.mobileFadeBadge.setAttribute?.(
+        "aria-hidden",
+        String(!ephemeralEnabled),
+      );
+    }
+  }
+
+  function isCompactMobileViewport() {
+    try {
+      return Boolean(window?.matchMedia?.("(max-width: 640px)")?.matches);
+    } catch {
+      return false;
+    }
   }
 
   function currentTool(surface) {
@@ -386,12 +1038,155 @@ export function createBoardController({
     const rect = canvas.getBoundingClientRect();
     const width = rect.width || canvas.width || 1;
     const height = rect.height || canvas.height || 1;
+    const viewport = boardViewportForSize({ width, height });
 
-    return normalizePoint({
-      x: (event.clientX - rect.left) / width,
-      y: (event.clientY - rect.top) / height,
+    return roundPoint(normalizePoint({
+      x: (event.clientX - rect.left - viewport.x) / (viewport.width || width),
+      y: (event.clientY - rect.top - viewport.y) / (viewport.height || height),
       pressure: event.pressure,
+    }));
+  }
+
+  function publishStrokePoint(stroke, point) {
+    const event = publish("stroke:point", {
+      strokeId: stroke.strokeId,
+      point,
     });
+    if (event) {
+      stroke.lastPoint = point;
+    }
+    return event;
+  }
+
+  function publishFinalPointIfChanged(stroke, point) {
+    if (!hasPointMoved(stroke.lastPoint, point)) {
+      return true;
+    }
+
+    return Boolean(publishStrokePoint(stroke, point));
+  }
+
+  function selectedColorForSurface(surface) {
+    const selected = selectedColors.get(surface);
+    const options = colorOptionsForSurface(surface);
+    return options.some((option) => option.color === selected)
+      ? selected
+      : options[0].color;
+  }
+
+  function updateColorControls() {
+    const options = colorOptionsForSurface(state.surface);
+    const selected = selectedColorForSurface(state.surface);
+
+    for (const [index, colorButton] of (elements.colorButtons ?? []).entries()) {
+      const option = options[index];
+      colorButton.hidden = !option;
+      if (!option) {
+        continue;
+      }
+
+      colorButton.style?.setProperty?.("--swatch-color", option.color);
+      colorButton.title = option.label;
+      colorButton.setAttribute?.("aria-label", option.label);
+      colorButton.dataset.color = option.color;
+      colorButton.classList?.toggle("is-active", option.color === selected);
+      colorButton.disabled = presenterLocked;
+    }
+  }
+
+  function updateSizeControls() {
+    if (elements.tipSizeInput) {
+      elements.tipSizeInput.value = String(tipWidth);
+    }
+    if (elements.tipSizeOutput) {
+      elements.tipSizeOutput.textContent = String(tipWidth);
+    }
+    if (elements.eraserSizeInput) {
+      elements.eraserSizeInput.value = String(eraserWidth);
+    }
+    if (elements.eraserSizeOutput) {
+      elements.eraserSizeOutput.textContent = String(eraserWidth);
+    }
+  }
+
+  function setPresenterControlsDisabled() {
+    for (const control of controlElements()) {
+      if (control) {
+        control.disabled = presenterLocked;
+      }
+    }
+
+    if (elements.undoButton) {
+      elements.undoButton.disabled = presenterLocked || undoStack.length === 0;
+    }
+    if (elements.quickUndoButton) {
+      elements.quickUndoButton.disabled =
+        presenterLocked || undoStack.length === 0;
+    }
+    if (elements.toolbarToggleButton) {
+      elements.toolbarToggleButton.disabled = presenterLocked;
+    }
+    if (elements.copyViewerButton) {
+      elements.copyViewerButton.disabled =
+        presenterLocked || !currentViewerURL;
+    }
+  }
+
+  function controlElements() {
+    return [
+      elements.surfaceSelect,
+      elements.penButton,
+      elements.eraserButton,
+      elements.pointerButton,
+      elements.ephemeralToggle,
+      elements.tipSizeInput,
+      elements.eraserSizeInput,
+      elements.clearButton,
+      elements.moreButton,
+      elements.copyViewerButton,
+      elements.quickUndoButton,
+      ...(elements.colorButtons ?? []),
+    ];
+  }
+
+  function lockPresenterControls() {
+    presenterLocked = true;
+    activeStroke = null;
+    activePointerId = null;
+    connectionState = "closed";
+    connectionPromise = null;
+    connectionGeneration += 1;
+    queuedEvents.length = 0;
+    transport.close();
+    setText(elements.sessionStatus, "Presenter active elsewhere");
+    updateControls();
+  }
+
+  function setSessionStatus(message, options = {}) {
+    if (manageSessionStatus) {
+      setText(
+        elements.sessionStatus,
+        options.label ?? SESSION_STATUS_LABELS[message] ?? message,
+      );
+      elements.sessionStatus?.setAttribute?.("title", options.title ?? message);
+      elements.sessionStatus?.setAttribute?.("aria-label", message);
+    }
+  }
+
+  function updateMorePanel() {
+    if (elements.sharePanel) {
+      elements.sharePanel.hidden = !morePanelExpanded;
+    }
+    elements.moreButton?.setAttribute?.(
+      "aria-expanded",
+      String(morePanelExpanded),
+    );
+  }
+
+  function setCopyViewerButtonLabel(label) {
+    if (elements.copyViewerButton) {
+      elements.copyViewerButton.textContent = label;
+    }
   }
 }
 
@@ -404,6 +1199,7 @@ export function createBoardApp({
   createSignalingClientImpl = createSignalingClient,
   createWebRTCTransport = createWebRTCDataChannelTransport,
   createPeerId: createPeerIdImpl = createPeerId,
+  copyText = defaultCopyText,
   reportError = defaultReportError,
 } = {}) {
   const root = document?.querySelector?.("#board-app");
@@ -413,6 +1209,7 @@ export function createBoardApp({
 
   const sessionStatus = root.querySelector("[data-board-session]");
   const mode = transportModeForLocation(location);
+  let controller = null;
   const transport =
     mode === "webrtc"
       ? createBoardWebRTCSetupTransport({
@@ -422,37 +1219,75 @@ export function createBoardApp({
           createSignalingClientImpl,
           createWebRTCTransport,
           peerId: createPeerIdImpl("board"),
+          reportError,
           reportSession(sessionId) {
             updateBoardSessionStatus(sessionStatus, location, sessionId);
+            controller?.setViewerURL(createViewerWebRTCURL(location, sessionId));
           },
           reportStatus(message) {
             setText(sessionStatus, message);
           },
-        })
+      })
       : createRelayTransport({
-          url: createRelayURL(location),
+          url: createRelayURL(location, "board"),
           WebSocketImpl,
         });
 
   if (mode === "relay") {
-    setText(sessionStatus, "Relay mode");
+    setText(sessionStatus, "Relay");
   }
 
-  const controller = createBoardController({
+  controller = createBoardController({
     elements: {
+      root,
       canvas: root.querySelector("[data-board-canvas]"),
       surfaceSelect: root.querySelector("[data-board-control='surface']"),
       penButton: root.querySelector("[data-board-control='pen']"),
       eraserButton: root.querySelector("[data-board-control='eraser']"),
       pointerButton: root.querySelector("[data-board-control='pointer']"),
+      colorButtons: Array.from(
+        root.querySelectorAll?.("[data-board-control='color']") ?? [],
+      ),
+      tipSizeInput: root.querySelector("[data-board-control='tip-size']"),
+      tipSizeOutput: root.querySelector("[data-board-output='tip-size']"),
+      eraserSizeInput: root.querySelector("[data-board-control='eraser-size']"),
+      eraserSizeOutput: root.querySelector("[data-board-output='eraser-size']"),
       ephemeralToggle: root.querySelector("[data-board-control='ephemeral']"),
+      undoButton: root.querySelector("[data-board-control='undo']"),
+      quickUndoButton: root.querySelector("[data-board-control='quick-undo']"),
+      moreButton: root.querySelector("[data-board-control='more']"),
+      sharePanel: root.querySelector("[data-board-share-panel]"),
+      shareViewerLink: root.querySelector("[data-board-share-link]"),
+      shareViewerInput: root.querySelector("[data-board-share-input]"),
+      shareViewerQR: root.querySelector("[data-board-share-qr]"),
+      copyViewerButton: root.querySelector("[data-board-control='copy-viewer']"),
+      toolbarToggleButton: root.querySelector(
+        "[data-board-control='toolbar-toggle']",
+      ),
+      toolbarCloseButton: root.querySelector(
+        "[data-board-control='toolbar-close']",
+      ),
+      mobileToolLabel: root.querySelector("[data-mobile-tool-label]"),
+      mobileToolIcons: Array.from(
+        root.querySelectorAll?.("[data-mobile-tool-icon]") ?? [],
+      ),
+      mobileColorDot: root.querySelector("[data-mobile-color-dot]"),
+      mobileFadeBadge: root.querySelector("[data-mobile-fade-badge]"),
       clearButton: root.querySelector("[data-board-control='clear']"),
+      sessionStatus,
     },
     transport,
     reportError,
+    copyText,
+    manageSessionStatus: mode === "relay",
+    viewerURL: mode === "webrtc" ? "" : createViewerRelayURL(location),
   });
 
   controller.connect().catch((error) => {
+    if (isBoardControllerClosedError(error)) {
+      return;
+    }
+
     if (mode === "webrtc") {
       setText(sessionStatus, "WebRTC connection failed");
     }
@@ -469,17 +1304,23 @@ function createBoardWebRTCSetupTransport({
   createSignalingClientImpl,
   createWebRTCTransport,
   peerId,
+  reportError,
   reportSession,
   reportStatus,
 }) {
   const handlers = new Set();
+  const statusHandlers = new Set();
   const realUnsubscribers = new Map();
   const pendingRejects = new Set();
   let signaling = null;
   let realTransport = null;
+  let unsubscribeRealStatus = null;
+  let unsubscribePeerLifecycle = null;
   let connectPromise = null;
+  let reconnectPromise = null;
   let sessionId = null;
   let closed = false;
+  let lastStatus = null;
 
   return {
     connect() {
@@ -517,6 +1358,13 @@ function createBoardWebRTCSetupTransport({
         realUnsubscribers.delete(handler);
       };
     },
+    onStatus(handler) {
+      statusHandlers.add(handler);
+
+      return () => {
+        statusHandlers.delete(handler);
+      };
+    },
     close() {
       if (closed) {
         return;
@@ -529,6 +1377,7 @@ function createBoardWebRTCSetupTransport({
   };
 
   async function connectWebRTC() {
+    emitStatus("connecting");
     reportStatus?.("Creating WebRTC session");
     signaling = createSignalingClientImpl({
       url: createSignalURL(location),
@@ -550,16 +1399,13 @@ function createBoardWebRTCSetupTransport({
 
     sessionId = createdMessage.sessionId;
     reportSession?.(sessionId);
+    attachPeerLifecycleHandler();
 
-    await waitForSignalingMessage((message) => {
-      return (
-        message.type === "signal:ice" &&
-        message.sessionId === sessionId &&
-        message.peerId !== peerId &&
-        message.payload?.onboardViewerReady ===
-          VIEWER_READY_SIGNAL_PAYLOAD.onboardViewerReady
-      );
-    });
+    await connectRealTransportAfterViewerReady();
+  }
+
+  async function connectRealTransportAfterViewerReady() {
+    await waitForViewerReady();
     throwIfClosed();
 
     realTransport = createWebRTCTransport({
@@ -568,9 +1414,27 @@ function createBoardWebRTCSetupTransport({
       sessionId,
       peerId,
       RTCPeerConnectionImpl,
+      closeSignalingOnClose: false,
     });
     attachHandlers();
+    attachStatusHandler();
     await realTransport.connect();
+    emitStatus("connected");
+    if (sessionId) {
+      reportSession?.(sessionId);
+    }
+  }
+
+  function waitForViewerReady() {
+    return waitForSignalingMessage((message) => {
+      return (
+        message.type === "signal:ice" &&
+        message.sessionId === sessionId &&
+        message.peerId !== peerId &&
+        message.payload?.onboardViewerReady ===
+          VIEWER_READY_SIGNAL_PAYLOAD.onboardViewerReady
+      );
+    });
   }
 
   function waitForSignalingMessage(predicate) {
@@ -610,6 +1474,45 @@ function createBoardWebRTCSetupTransport({
     }
   }
 
+  function attachStatusHandler() {
+    if (
+      unsubscribeRealStatus ||
+      !realTransport ||
+      typeof realTransport.onStatus !== "function"
+    ) {
+      return;
+    }
+
+    unsubscribeRealStatus = realTransport.onStatus(handleRealTransportStatus);
+  }
+
+  function attachPeerLifecycleHandler() {
+    if (unsubscribePeerLifecycle || !signaling) {
+      return;
+    }
+
+    unsubscribePeerLifecycle = signaling.onMessage((message) => {
+      if (
+        message.type === "session:peer-left" &&
+        message.sessionId === sessionId &&
+        message.peerId !== peerId &&
+        message.payload?.role === "viewer" &&
+        realTransport
+      ) {
+        startReconnect({ closeRealTransport: true });
+      }
+    });
+  }
+
+  function handleRealTransportStatus(status) {
+    if (status === "disconnected" || status === "closed") {
+      startReconnect();
+      return;
+    }
+
+    emitStatus(status);
+  }
+
   function attachHandler(handler) {
     if (!realTransport || realUnsubscribers.has(handler)) {
       return;
@@ -626,22 +1529,69 @@ function createBoardWebRTCSetupTransport({
   }
 
   function closeResources() {
+    reconnectPromise = null;
+    cleanupRealTransport();
+
+    unsubscribePeerLifecycle?.();
+    unsubscribePeerLifecycle = null;
+    signaling?.close();
+    signaling = null;
+  }
+
+  function cleanupRealTransport({ close = true } = {}) {
+    unsubscribeRealStatus?.();
+    unsubscribeRealStatus = null;
+
     for (const unsubscribe of realUnsubscribers.values()) {
       unsubscribe();
     }
     realUnsubscribers.clear();
 
-    realTransport?.close();
+    if (close) {
+      realTransport?.close();
+    }
     realTransport = null;
-
-    signaling?.close();
-    signaling = null;
   }
 
   function throwIfClosed() {
     if (closed) {
       throw new Error("WebRTC board transport is closed");
     }
+  }
+
+  function emitStatus(status) {
+    if (status === lastStatus) {
+      return;
+    }
+
+    lastStatus = status;
+    for (const handler of statusHandlers) {
+      handler(status);
+    }
+  }
+
+  function startReconnect({ closeRealTransport = false } = {}) {
+    if (closed || reconnectPromise || !signaling || !sessionId) {
+      return;
+    }
+
+    emitStatus("reconnecting");
+    reportStatus?.("WebRTC reconnecting");
+    cleanupRealTransport({ close: closeRealTransport });
+
+    reconnectPromise = connectRealTransportAfterViewerReady()
+      .catch((error) => {
+        if (!closed) {
+          emitStatus("disconnected");
+          reportStatus?.("WebRTC disconnected");
+          reportError?.(error);
+        }
+        throw error;
+      })
+      .catch(() => {})
+      .finally(() => {
+        reconnectPromise = null;
+      });
   }
 }
 
@@ -654,17 +1604,94 @@ function compatiblePen(surface) {
   return PEN_BY_SURFACE[surface] ?? "marker";
 }
 
-function styleForTool(tool, surface) {
+function styleForTool(tool, _surface, options = {}) {
   if (tool === "eraser") {
-    return ERASER_STYLE;
+    return {
+      color: ERASER_STYLE.color,
+      width: options.eraserWidth ?? ERASER_STYLE.width,
+    };
   }
 
-  return PEN_STYLES[surface] ?? PEN_STYLES.whiteboard;
+  return {
+    color: options.color ?? COLOR_OPTIONS_BY_SURFACE.whiteboard[0].color,
+    width: options.tipWidth ?? DEFAULT_TIP_WIDTH,
+  };
 }
 
 function setPressed(element, pressed) {
   element?.classList?.toggle("is-active", pressed);
   element?.setAttribute?.("aria-pressed", String(pressed));
+}
+
+function setButtonLabel(button, label) {
+  const labelElement = button?.querySelector?.("[data-tool-label]");
+  if (labelElement) {
+    labelElement.textContent = label;
+    return;
+  }
+
+  if (button) {
+    button.textContent = label;
+  }
+}
+
+function setSurfaceIndicator(surfaceSelect, surface) {
+  const toolbar = surfaceSelect?.closest?.(".toolbar");
+  toolbar?.style?.setProperty?.(
+    "--surface-color",
+    SURFACE_COLORS[surface] ?? SURFACE_COLORS.whiteboard,
+  );
+  toolbar?.setAttribute?.("data-surface", surface);
+
+  const label = toolbar?.querySelector?.("[data-surface-label]");
+  if (label) {
+    label.textContent =
+      SURFACE_SHORT_LABELS[surface] ?? SURFACE_SHORT_LABELS.whiteboard;
+  }
+}
+
+function colorOptionsForSurface(surface) {
+  return COLOR_OPTIONS_BY_SURFACE[surface] ?? COLOR_OPTIONS_BY_SURFACE.whiteboard;
+}
+
+function coalescedPointerEvents(event) {
+  try {
+    const events = event.getCoalescedEvents?.();
+    return events?.length ? events : [event];
+  } catch {
+    return [event];
+  }
+}
+
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, number));
+}
+
+function roundPoint(point) {
+  return {
+    x: roundCoordinate(point.x),
+    y: roundCoordinate(point.y),
+    pressure: roundCoordinate(point.pressure),
+  };
+}
+
+function roundCoordinate(value) {
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+function hasPointMoved(previous, next) {
+  if (!previous || !next) {
+    return true;
+  }
+
+  const dx = previous.x - next.x;
+  const dy = previous.y - next.y;
+  return dx * dx + dy * dy > FINAL_POINT_EPSILON;
 }
 
 function transportModeForLocation(location) {
@@ -677,12 +1704,68 @@ function updateBoardSessionStatus(element, location, sessionId) {
   setText(element, `WebRTC session ${sessionId}. Viewer: ${viewerURL}`);
 }
 
+function createViewerRelayURL(location) {
+  const base = `${location.protocol}//${location.host}`;
+  return new URL("/viewer", base).href;
+}
+
+function createViewerWebRTCBaseURL(location) {
+  const base = `${location.protocol}//${location.host}`;
+  const url = new URL("/viewer", base);
+  url.searchParams.set("transport", "webrtc");
+  return url.href;
+}
+
 function createViewerWebRTCURL(location, sessionId) {
   const base = `${location.protocol}//${location.host}`;
   const url = new URL("/viewer", base);
   url.searchParams.set("transport", "webrtc");
   url.searchParams.set("sessionId", sessionId);
-  return `${url.pathname}${url.search}`;
+  return url.href;
+}
+
+function updateViewerShareElements(elements, viewerURL) {
+  const url = String(viewerURL ?? "");
+  const hasURL = url.length > 0;
+  if (elements.shareViewerLink) {
+    if (hasURL) {
+      elements.shareViewerLink.href = url;
+      elements.shareViewerLink.setAttribute?.("href", url);
+    } else {
+      elements.shareViewerLink.href = "";
+      elements.shareViewerLink.removeAttribute?.("href");
+    }
+    elements.shareViewerLink.setAttribute?.(
+      "aria-disabled",
+      String(!hasURL),
+    );
+  }
+  if (elements.shareViewerInput) {
+    elements.shareViewerInput.value = url;
+    elements.shareViewerInput.placeholder = hasURL
+      ? ""
+      : "Waiting for viewer link";
+  }
+  if (elements.shareViewerQR) {
+    const document = elements.shareViewerQR.ownerDocument ?? globalThis.document;
+    if (document?.createElementNS && document?.createElement) {
+      elements.shareViewerQR.replaceChildren?.(
+        hasURL
+          ? createShareQRCodeElement(document, url, "Viewer", {
+              className: "share-qr board-share-qr",
+              fallbackClassName: "share-qr-fallback board-share-qr-fallback",
+            })
+          : createWaitingViewerLinkElement(document),
+      );
+    }
+  }
+}
+
+function createWaitingViewerLinkElement(document) {
+  const element = document.createElement("span");
+  element.className = "share-qr-fallback board-share-qr-fallback";
+  element.textContent = "Waiting for link";
+  return element;
 }
 
 function setText(element, message) {
@@ -693,6 +1776,10 @@ function setText(element, message) {
 
 function defaultReportError(error) {
   console.error("Board transport error", error);
+}
+
+function isBoardControllerClosedError(error) {
+  return error instanceof Error && error.message === "board controller is closed";
 }
 
 function createEventSessionId() {

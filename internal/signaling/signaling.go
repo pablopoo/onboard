@@ -26,9 +26,10 @@ const (
 type SignalType string
 
 const (
-	SignalOffer  SignalType = "offer"
-	SignalAnswer SignalType = "answer"
-	SignalICE    SignalType = "ice"
+	SignalOffer    SignalType = "offer"
+	SignalAnswer   SignalType = "answer"
+	SignalICE      SignalType = "ice"
+	SignalPeerLeft SignalType = "peer-left"
 )
 
 type Peer struct {
@@ -43,8 +44,9 @@ type Session struct {
 }
 
 type Signal struct {
-	Type    SignalType     `json:"type"`
-	Payload map[string]any `json:"payload,omitempty"`
+	Type       SignalType     `json:"type"`
+	FromPeerID string         `json:"-"`
+	Payload    map[string]any `json:"payload,omitempty"`
 }
 
 type Registry struct {
@@ -132,6 +134,13 @@ func (r *Registry) ReleasePeer(sessionID string, peerID string) error {
 		delete(r.sessions, sessionID)
 
 	case session.viewer.ID == peerID:
+		r.sendSignalLocked(session.subscribers[session.board.ID], Signal{
+			Type:       SignalPeerLeft,
+			FromPeerID: peerID,
+			Payload: map[string]any{
+				"role": string(RoleViewer),
+			},
+		}, &closing)
 		for subscriber := range session.subscribers[peerID] {
 			closing = append(closing, subscriber)
 		}
@@ -212,15 +221,9 @@ func (r *Registry) SendSignal(sessionID string, fromPeerID string, signal Signal
 	}
 
 	outbound := cloneSignal(signal)
+	outbound.FromPeerID = fromPeerID
 	var dropped []*subscription
-	for subscriber := range session.subscribers[toPeerID] {
-		select {
-		case subscriber.signals <- cloneSignal(outbound):
-		default:
-			delete(session.subscribers[toPeerID], subscriber)
-			dropped = append(dropped, subscriber)
-		}
-	}
+	r.sendSignalLocked(session.subscribers[toPeerID], outbound, &dropped)
 	if len(session.subscribers[toPeerID]) == 0 {
 		delete(session.subscribers, toPeerID)
 	}
@@ -231,6 +234,17 @@ func (r *Registry) SendSignal(sessionID string, fromPeerID string, signal Signal
 	}
 
 	return nil
+}
+
+func (r *Registry) sendSignalLocked(subscribers map[*subscription]struct{}, signal Signal, dropped *[]*subscription) {
+	for subscriber := range subscribers {
+		select {
+		case subscriber.signals <- cloneSignal(signal):
+		default:
+			delete(subscribers, subscriber)
+			*dropped = append(*dropped, subscriber)
+		}
+	}
 }
 
 func (s *session) snapshot() Session {
@@ -279,8 +293,9 @@ func isWebRTCSignal(signalType SignalType) bool {
 
 func cloneSignal(signal Signal) Signal {
 	return Signal{
-		Type:    signal.Type,
-		Payload: clonePayload(signal.Payload),
+		Type:       signal.Type,
+		FromPeerID: signal.FromPeerID,
+		Payload:    clonePayload(signal.Payload),
 	}
 }
 

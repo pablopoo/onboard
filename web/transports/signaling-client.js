@@ -3,6 +3,7 @@ const INBOUND_SIGNAL_TYPES = new Set([
   "signal:offer",
   "signal:answer",
   "signal:ice",
+  "session:peer-left",
 ]);
 
 export function createSignalingClient({
@@ -13,7 +14,15 @@ export function createSignalingClient({
   const openReadyState = WebSocketImpl.OPEN ?? 1;
   let socket = null;
   let socketMessageHandler = null;
+  let socketErrorHandler = null;
+  let socketCloseHandler = null;
   let connectionPromise = null;
+
+  function notifyHandlers(message) {
+    for (const handler of handlers) {
+      handler(message);
+    }
+  }
 
   function handleMessage(currentSocket, message) {
     if (socket !== currentSocket || currentSocket.readyState !== openReadyState) {
@@ -32,9 +41,39 @@ export function createSignalingClient({
       return;
     }
 
-    for (const handler of handlers) {
-      handler(parsed);
+    notifyHandlers(parsed);
+  }
+
+  function detachSocket(currentSocket) {
+    if (socketMessageHandler) {
+      currentSocket.removeEventListener?.("message", socketMessageHandler);
     }
+    if (socketErrorHandler) {
+      currentSocket.removeEventListener?.("error", socketErrorHandler);
+    }
+    if (socketCloseHandler) {
+      currentSocket.removeEventListener?.("close", socketCloseHandler);
+    }
+
+    if (socket === currentSocket) {
+      socket = null;
+      socketMessageHandler = null;
+      socketErrorHandler = null;
+      socketCloseHandler = null;
+      connectionPromise = null;
+    }
+  }
+
+  function handleRuntimeFailure(currentSocket, error) {
+    if (socket !== currentSocket) {
+      return;
+    }
+
+    detachSocket(currentSocket);
+    notifyHandlers({
+      type: "error",
+      error,
+    });
   }
 
   function sendMessage(message) {
@@ -74,32 +113,37 @@ export function createSignalingClient({
           currentSocket.removeEventListener?.("close", handleClose);
         }
 
-        function detachCurrentSocket() {
-          currentSocket.removeEventListener?.("message", currentMessageHandler);
-          if (socket === currentSocket) {
-            socket = null;
-            socketMessageHandler = null;
-            connectionPromise = null;
-          }
-        }
-
         function handleOpen() {
           cleanup();
           if (socket === currentSocket) {
             connectionPromise = null;
+            socketErrorHandler = () => {
+              handleRuntimeFailure(
+                currentSocket,
+                "WebSocket signaling error",
+              );
+            };
+            socketCloseHandler = () => {
+              handleRuntimeFailure(
+                currentSocket,
+                "WebSocket signaling closed",
+              );
+            };
+            currentSocket.addEventListener("error", socketErrorHandler);
+            currentSocket.addEventListener("close", socketCloseHandler);
           }
           resolve();
         }
 
         function handleError() {
           cleanup();
-          detachCurrentSocket();
+          detachSocket(currentSocket);
           reject(new Error("WebSocket failed before open"));
         }
 
         function handleClose() {
           cleanup();
-          detachCurrentSocket();
+          detachSocket(currentSocket);
           reject(new Error("WebSocket closed before open"));
         }
 
@@ -154,14 +198,7 @@ export function createSignalingClient({
       }
 
       const currentSocket = socket;
-      const currentMessageHandler = socketMessageHandler;
-      if (currentMessageHandler) {
-        currentSocket.removeEventListener?.("message", currentMessageHandler);
-      }
-
-      socket = null;
-      socketMessageHandler = null;
-      connectionPromise = null;
+      detachSocket(currentSocket);
       currentSocket.close();
     },
   };

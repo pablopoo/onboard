@@ -10,12 +10,14 @@ export function createWebRTCDataChannelTransport({
   peerId,
   RTCPeerConnectionImpl = RTCPeerConnection,
   createConnectionId = defaultCreateConnectionId,
+  closeSignalingOnClose = true,
 }) {
   if (!VALID_ROLES.has(role)) {
     throw new TypeError("role must be either board or viewer");
   }
 
   const handlers = new Set();
+  const statusHandlers = new Set();
   let peerConnection = null;
   let dataChannel = null;
   let unsubscribeSignals = null;
@@ -28,6 +30,18 @@ export function createWebRTCDataChannelTransport({
   let pendingRemoteIceCandidates = [];
   let localConnectionId = null;
   let remoteConnectionId = null;
+  let lastStatus = null;
+
+  function emitStatus(status) {
+    if (status === lastStatus) {
+      return;
+    }
+
+    lastStatus = status;
+    for (const handler of statusHandlers) {
+      handler(status);
+    }
+  }
 
   function attachDataChannel(channel) {
     dataChannel = channel;
@@ -43,6 +57,7 @@ export function createWebRTCDataChannelTransport({
 
   function handleDataChannelOpen() {
     connectResolved = true;
+    emitStatus("connected");
     resolveConnect?.();
     resolveConnect = null;
     rejectConnect = null;
@@ -401,7 +416,9 @@ export function createWebRTCDataChannelTransport({
 
     unsubscribeSignals?.();
     unsubscribeSignals = null;
-    signaling.close?.();
+    if (closeSignalingOnClose) {
+      signaling.close?.();
+    }
 
     const channel = dataChannel;
     dataChannel = null;
@@ -419,6 +436,7 @@ export function createWebRTCDataChannelTransport({
     pendingRemoteIceCandidates = [];
     localConnectionId = null;
     remoteConnectionId = null;
+    emitStatus("disconnected");
   }
 
   function trackListener(target, type, listener) {
@@ -431,6 +449,7 @@ export function createWebRTCDataChannelTransport({
         return connectPromise;
       }
 
+      emitStatus("connecting");
       peerConnection = new RTCPeerConnectionImpl();
       connectResolved = false;
       remoteDescriptionSet = false;
@@ -455,6 +474,14 @@ export function createWebRTCDataChannelTransport({
       });
       unsubscribeSignals = signaling.onMessage((message) => {
         const currentPeerConnection = peerConnection;
+        if (message?.type === "error") {
+          closeWithPendingErrorFor(
+            currentPeerConnection,
+            new Error(`WebRTC signaling error: ${message.error ?? "unknown error"}`),
+          );
+          return;
+        }
+
         handleSignal(message, currentPeerConnection).catch((error) => {
           closeWithPendingErrorFor(currentPeerConnection, error);
         });
@@ -485,6 +512,14 @@ export function createWebRTCDataChannelTransport({
 
       return () => {
         handlers.delete(handler);
+      };
+    },
+
+    onStatus(handler) {
+      statusHandlers.add(handler);
+
+      return () => {
+        statusHandlers.delete(handler);
       };
     },
 

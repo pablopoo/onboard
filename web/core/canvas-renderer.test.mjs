@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  boardViewportForSize,
   renderBoardState,
   resizeCanvasToDisplaySize,
 } from "./canvas-renderer.js";
@@ -18,6 +19,7 @@ function makeContext() {
     lineWidth: undefined,
     lineCap: undefined,
     lineJoin: undefined,
+    lineDash: [],
     globalAlpha: 1,
     calls,
     clearRect(...args) {
@@ -35,6 +37,9 @@ function makeContext() {
     lineTo(...args) {
       calls.push({ name: "lineTo", args });
     },
+    quadraticCurveTo(...args) {
+      calls.push({ name: "quadraticCurveTo", args });
+    },
     stroke() {
       calls.push({
         name: "stroke",
@@ -42,8 +47,13 @@ function makeContext() {
         lineWidth: this.lineWidth,
         lineCap: this.lineCap,
         lineJoin: this.lineJoin,
+        lineDash: this.lineDash,
         globalAlpha: this.globalAlpha,
       });
+    },
+    setLineDash(value) {
+      this.lineDash = [...value];
+      calls.push({ name: "setLineDash", args: [value] });
     },
     arc(...args) {
       calls.push({ name: "arc", args });
@@ -62,6 +72,7 @@ function makeContext() {
         lineWidth: this.lineWidth,
         lineCap: this.lineCap,
         lineJoin: this.lineJoin,
+        lineDash: this.lineDash,
         globalAlpha: this.globalAlpha,
       });
       calls.push({ name: "save" });
@@ -73,6 +84,42 @@ function makeContext() {
   };
 
   return ctx;
+}
+
+function makeCacheableContext() {
+  const ctx = makeContext();
+  const layerContexts = [];
+
+  ctx.drawImage = (...args) => {
+    ctx.calls.push({ name: "drawImage", args });
+  };
+  ctx.canvas.ownerDocument = {
+    createElement(name) {
+      assert.equal(name, "canvas");
+      const layerCanvas = {
+        width: 0,
+        height: 0,
+        getContext(type) {
+          assert.equal(type, "2d");
+          const layerContext = makeContext();
+          layerContext.canvas = layerCanvas;
+          layerContexts.push(layerContext);
+          return layerContext;
+        },
+      };
+      return layerCanvas;
+    },
+  };
+  ctx.layerContexts = layerContexts;
+
+  return ctx;
+}
+
+function clearCalls(ctx) {
+  ctx.calls.length = 0;
+  for (const layerContext of ctx.layerContexts ?? []) {
+    layerContext.calls.length = 0;
+  }
 }
 
 function makeState(overrides = {}) {
@@ -104,6 +151,25 @@ function findCalls(ctx, name) {
   return ctx.calls.filter((call) => call.name === name);
 }
 
+function assertNearlyEqual(actual, expected, epsilon = 1e-9) {
+  assert.ok(
+    Math.abs(actual - expected) <= epsilon,
+    `expected ${actual} to be within ${epsilon} of ${expected}`,
+  );
+}
+
+function assertViewport(actual, expected) {
+  assertNearlyEqual(actual.x, expected.x);
+  assertNearlyEqual(actual.y, expected.y);
+  assertNearlyEqual(actual.width, expected.width);
+  assertNearlyEqual(actual.height, expected.height);
+}
+
+function assertPoint(actual, expected) {
+  assertNearlyEqual(actual[0], expected[0]);
+  assertNearlyEqual(actual[1], expected[1]);
+}
+
 test("renderBoardState clears the canvas", () => {
   const ctx = makeContext();
 
@@ -126,7 +192,15 @@ test("renderBoardState paints surface background for supported surfaces", () => 
     renderBoardState(ctx, makeState({ surface }), SIZE);
 
     const fillRect = findCalls(ctx, "fillRect")[0];
-    assert.deepEqual(fillRect.args, [0, 0, 200, 100]);
+    assertViewport(
+      {
+        x: fillRect.args[0],
+        y: fillRect.args[1],
+        width: fillRect.args[2],
+        height: fillRect.args[3],
+      },
+      { x: 100 / 9, y: 0, width: 1600 / 9, height: 100 },
+    );
     assert.equal(typeof fillRect.fillStyle, "string");
     backgrounds.set(surface, fillRect.fillStyle);
   }
@@ -134,13 +208,40 @@ test("renderBoardState paints surface background for supported surfaces", () => 
   assert.equal(new Set(backgrounds.values()).size, 4);
 });
 
-test("renderBoardState draws a completed marker stroke using normalized points", () => {
+test("boardViewportForSize centers a 16:9 frame in wide canvases", () => {
+  assertViewport(boardViewportForSize({ width: 200, height: 100 }), {
+    x: 100 / 9,
+    y: 0,
+    width: 1600 / 9,
+    height: 100,
+  });
+});
+
+test("boardViewportForSize centers a 16:9 frame in tall canvases", () => {
+  assertViewport(boardViewportForSize({ width: 100, height: 100 }), {
+    x: 0,
+    y: 175 / 8,
+    width: 100,
+    height: 225 / 4,
+  });
+});
+
+test("boardViewportForSize accepts a custom aspect ratio", () => {
+  assertViewport(boardViewportForSize({ width: 100, height: 100 }, 1), {
+    x: 0,
+    y: 0,
+    width: 100,
+    height: 100,
+  });
+});
+
+test("renderBoardState draws a completed marker stroke using normalized points inside the board viewport", () => {
   const ctx = makeContext();
 
   renderBoardState(ctx, makeState({ strokes: [makeStroke()] }), SIZE);
 
-  assert.deepEqual(findCalls(ctx, "moveTo")[0].args, [50, 50]);
-  assert.deepEqual(findCalls(ctx, "lineTo")[0].args, [150, 25]);
+  assertPoint(findCalls(ctx, "moveTo")[0].args, [500 / 9, 50]);
+  assertPoint(findCalls(ctx, "lineTo")[0].args, [1300 / 9, 25]);
 
   const stroke = findCalls(ctx, "stroke")[0];
   assert.equal(stroke.strokeStyle, "#111111");
@@ -148,6 +249,62 @@ test("renderBoardState draws a completed marker stroke using normalized points",
   assert.equal(stroke.lineCap, "round");
   assert.equal(stroke.lineJoin, "round");
   assert.equal(stroke.globalAlpha, 1);
+});
+
+test("renderBoardState caches completed non-ephemeral strokes between renders", () => {
+  const ctx = makeCacheableContext();
+  const completedStroke = makeStroke({ strokeId: "completed_1" });
+  const activeStroke = makeStroke({
+    strokeId: "active_1",
+    complete: false,
+    points: [
+      { x: 0.1, y: 0.2, pressure: 0 },
+      { x: 0.2, y: 0.3, pressure: 0 },
+    ],
+  });
+
+  renderBoardState(ctx, makeState({ strokes: [completedStroke] }), SIZE);
+
+  assert.equal(ctx.layerContexts.length, 1);
+  assert.equal(findCalls(ctx.layerContexts[0], "stroke").length, 1);
+
+  clearCalls(ctx);
+
+  renderBoardState(
+    ctx,
+    makeState({ strokes: [completedStroke, activeStroke] }),
+    SIZE,
+  );
+
+  assert.equal(findCalls(ctx.layerContexts[0], "stroke").length, 0);
+  assert.equal(findCalls(ctx, "drawImage").length, 1);
+  assert.equal(findCalls(ctx, "stroke").length, 1);
+});
+
+test("renderBoardState smooths multi-point strokes with quadratic curves", () => {
+  const ctx = makeContext();
+
+  renderBoardState(
+    ctx,
+    makeState({
+      strokes: [
+        makeStroke({
+          points: [
+            { x: 0.1, y: 0.2, pressure: 0 },
+            { x: 0.4, y: 0.8, pressure: 0 },
+            { x: 0.8, y: 0.3, pressure: 0 },
+          ],
+        }),
+      ],
+    }),
+    SIZE,
+  );
+
+  assertPoint(findCalls(ctx, "moveTo")[0].args, [260 / 9, 20]);
+  const curve = findCalls(ctx, "quadraticCurveTo")[0].args;
+  assertPoint(curve.slice(0, 2), [740 / 9, 80]);
+  assertPoint(curve.slice(2), [1060 / 9, 55]);
+  assertPoint(findCalls(ctx, "lineTo").at(-1).args, [1380 / 9, 30]);
 });
 
 test("renderBoardState draws a chalk stroke with distinguishable alpha and width from marker", () => {
@@ -172,10 +329,55 @@ test("renderBoardState draws a chalk stroke with distinguishable alpha and width
   );
 
   const markerStroke = findCalls(markerCtx, "stroke")[0];
-  const chalkStroke = findCalls(chalkCtx, "stroke")[0];
+  const chalkStrokes = findCalls(chalkCtx, "stroke");
+  const chalkStroke = chalkStrokes[0];
 
   assert.ok(chalkStroke.globalAlpha < markerStroke.globalAlpha);
-  assert.ok(chalkStroke.lineWidth > markerStroke.lineWidth);
+  assert.ok(chalkStrokes.some((call) => call.lineWidth > markerStroke.lineWidth));
+});
+
+test("renderBoardState renders chalk as particle stamps instead of dashed gaps", () => {
+  const ctx = makeContext();
+
+  renderBoardState(
+    ctx,
+    makeState({
+      surface: "greenboard",
+      strokes: [
+        makeStroke({
+          strokeId: "chalk_texture_1",
+          surface: "greenboard",
+          tool: "chalk",
+          color: "#eeeeee",
+          points: [
+            { x: 0.1, y: 0.2, pressure: 0 },
+            { x: 0.24, y: 0.42, pressure: 0.2 },
+            { x: 0.42, y: 0.3, pressure: 0.4 },
+            { x: 0.66, y: 0.62, pressure: 0.3 },
+            { x: 0.86, y: 0.46, pressure: 0.1 },
+          ],
+        }),
+      ],
+    }),
+    SIZE,
+  );
+
+  const chalkStrokes = findCalls(ctx, "stroke");
+  const chalkFills = findCalls(ctx, "fill").filter(
+    (call) => call.fillStyle === "#eeeeee",
+  );
+  const backgroundFills = findCalls(ctx, "fill").filter(
+    (call) => call.fillStyle === "#254f3a",
+  );
+
+  assert.equal(findCalls(ctx, "setLineDash").length, 0);
+  assert.equal(backgroundFills.length, 0);
+  assert.ok(chalkFills.length >= 30);
+  assert.ok(chalkFills.some((call) => call.globalAlpha < 0.18));
+  assert.ok(chalkFills.some((call) => call.globalAlpha > 0.22));
+  assert.ok(chalkFills.every((call) => call.globalAlpha <= 0.34));
+  assert.ok(chalkStrokes.some((call) => call.globalAlpha >= 0.44));
+  assert.ok(chalkStrokes.some((call) => call.globalAlpha < 0.2));
 });
 
 test("renderBoardState uses background-colored stroke for eraser", () => {
@@ -243,7 +445,7 @@ test("renderBoardState draws a one-point stroke as an explicit dot", () => {
     SIZE,
   );
 
-  assert.deepEqual(findCalls(ctx, "arc")[0].args.slice(0, 2), [50, 50]);
+  assertPoint(findCalls(ctx, "arc")[0].args.slice(0, 2), [500 / 9, 50]);
   assert.equal(findCalls(ctx, "fill").length, 1);
   assert.equal(findCalls(ctx, "lineTo").length, 0);
 });
@@ -289,23 +491,24 @@ test("renderBoardState skips expired ephemeral strokes when options.now is past 
   assert.equal(strokes[0].strokeStyle, "#123456");
 });
 
-test("renderBoardState draws pointer only when pointer.visible true", () => {
+test("renderBoardState draws pointer only when pointer.visible true and maps it through the board viewport", () => {
   const hiddenCtx = makeContext();
   const visibleCtx = makeContext();
+  const tallSize = { width: 100, height: 100 };
 
   renderBoardState(
     hiddenCtx,
     makeState({ pointer: { visible: false, point: { x: 0.5, y: 0.5 } } }),
-    SIZE,
+    tallSize,
   );
   renderBoardState(
     visibleCtx,
     makeState({ pointer: { visible: true, point: { x: 0.5, y: 0.25 } } }),
-    SIZE,
+    tallSize,
   );
 
   assert.equal(findCalls(hiddenCtx, "arc").length, 0);
-  assert.deepEqual(findCalls(visibleCtx, "arc")[0].args.slice(0, 2), [100, 25]);
+  assertPoint(findCalls(visibleCtx, "arc")[0].args.slice(0, 2), [50, 575 / 16]);
   assert.equal(findCalls(visibleCtx, "fill").length, 1);
 });
 

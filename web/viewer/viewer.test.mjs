@@ -72,6 +72,7 @@ function createDeferred() {
 
 function createFakeTransport(options = {}) {
   const handlers = new Set();
+  const statusHandlers = new Set();
   const connection = createDeferred();
 
   return {
@@ -104,9 +105,20 @@ function createFakeTransport(options = {}) {
         handlers.delete(handler);
       };
     },
+    onStatus(handler) {
+      statusHandlers.add(handler);
+      return () => {
+        statusHandlers.delete(handler);
+      };
+    },
     emit(event) {
       for (const handler of handlers) {
         handler(event);
+      }
+    },
+    emitStatus(status) {
+      for (const handler of statusHandlers) {
+        handler(status);
       }
     },
     close() {
@@ -198,8 +210,33 @@ function createFakeResizeObserverClass() {
   return FakeResizeObserver;
 }
 
+function createFakeTimers() {
+  const scheduled = [];
+
+  return {
+    scheduled,
+    setTimeout(callback, delay) {
+      const timer = { callback, delay };
+      scheduled.push(timer);
+      return timer;
+    },
+    clearTimeout(timer) {
+      const index = scheduled.indexOf(timer);
+      if (index >= 0) {
+        scheduled.splice(index, 1);
+      }
+    },
+    runNext() {
+      const timer = scheduled.shift();
+      timer?.callback();
+      return timer;
+    },
+  };
+}
+
 function createFakeWindow() {
   const listeners = new Map();
+  const animationFrames = [];
 
   return {
     addEventListener(type, listener) {
@@ -218,6 +255,25 @@ function createFakeWindow() {
     },
     listenerCount(type) {
       return listeners.get(type)?.size ?? 0;
+    },
+    requestAnimationFrame(callback) {
+      animationFrames.push(callback);
+      return callback;
+    },
+    cancelAnimationFrame(callback) {
+      const index = animationFrames.indexOf(callback);
+      if (index >= 0) {
+        animationFrames.splice(index, 1);
+      }
+    },
+    flushAnimationFrame() {
+      const callbacks = animationFrames.splice(0);
+      for (const callback of callbacks) {
+        callback();
+      }
+    },
+    pendingAnimationFrameCount() {
+      return animationFrames.length;
     },
   };
 }
@@ -245,6 +301,8 @@ function createFixture(options = {}) {
         renders.push({ ctx, snapshot, size, options: renderOptions });
       },
       ResizeObserverImpl: options.ResizeObserverImpl,
+      setTimeout: options.setTimeout,
+      clearTimeout: options.clearTimeout,
       window: options.window,
     });
 
@@ -333,6 +391,10 @@ test("createRelayURL maps http and https locations to /ws/relay", async () => {
     createRelayURL({ protocol: "https:", host: "board.test" }),
     "wss://board.test/ws/relay",
   );
+  assert.equal(
+    createRelayURL({ protocol: "http:", host: "local.test:8080" }, "viewer"),
+    "ws://local.test:8080/ws/relay?role=viewer",
+  );
 });
 
 test("createSignalURL maps http and https locations to /signal", async () => {
@@ -371,7 +433,7 @@ test("viewer app defaults to relay transport", async () => {
   await flushAsyncWork();
 
   assert.equal(relayCalls.length, 1);
-  assert.equal(relayCalls[0].url, "ws://local.test:8080/ws/relay");
+  assert.equal(relayCalls[0].url, "ws://local.test:8080/ws/relay?role=viewer");
   assert.equal(relayTransport.connectCalls, 1);
   assert.deepEqual(signalingCalls, []);
   assertViewerStatus(root.querySelector("[data-viewer-status]"), "Connected");
@@ -404,7 +466,7 @@ test("viewer app honors explicit relay transport mode", async () => {
   await flushAsyncWork();
 
   assert.equal(relayCalls.length, 1);
-  assert.equal(relayCalls[0].url, "wss://viewer.test/ws/relay");
+  assert.equal(relayCalls[0].url, "wss://viewer.test/ws/relay?role=viewer");
   assert.equal(relayTransport.connectCalls, 1);
 
   controller.close();
@@ -495,6 +557,126 @@ test("webrtc viewer joins session, sends setup ready signal, and connects data c
   assertViewerStatus(root.querySelector("[data-viewer-status]"), "Connected");
   assert.deepEqual(errors, []);
 
+  webRTCTransport.emitStatus("disconnected");
+  await flushAsyncWork();
+
+  assertViewerStatus(root.querySelector("[data-viewer-status]"), "Connected");
+
+  controller.close();
+});
+
+test("webrtc viewer reconnects data channel after established disconnect", async () => {
+  const { createViewerApp } = await loadViewerModule();
+  const root = createViewerAppRoot();
+  const signaling = createFakeSignalingClient();
+  const webRTCTransports = [createFakeTransport(), createFakeTransport()];
+  const webRTCCalls = [];
+
+  const controller = createViewerApp({
+    document: createFakeDocument(root),
+    location: {
+      protocol: "https:",
+      host: "viewer.test",
+      search: "?transport=webrtc&sessionId=session-42",
+    },
+    WebSocketImpl: class FakeWebSocket {},
+    RTCPeerConnectionImpl: class FakeRTCPeerConnection {},
+    createPeerId: () => "viewer-peer",
+    createRelayTransport() {
+      throw new Error("relay should not be used in webrtc mode");
+    },
+    createSignalingClientImpl() {
+      return signaling;
+    },
+    createWebRTCTransport(options) {
+      webRTCCalls.push(options);
+      return webRTCTransports[webRTCCalls.length - 1];
+    },
+  });
+  await flushAsyncWork();
+
+  signaling.emit({
+    type: "session:joined",
+    sessionId: "session-42",
+    peerId: "viewer-peer",
+    role: "viewer",
+  });
+  await flushAsyncWork();
+
+  assert.equal(webRTCCalls.length, 1);
+  assert.equal(webRTCTransports[0].connectCalls, 1);
+  assert.equal(signaling.sentSignals.length, 1);
+
+  webRTCTransports[0].emitStatus("disconnected");
+  await flushAsyncWork();
+
+  assertViewerStatus(root.querySelector("[data-viewer-status]"), "Connected");
+  assert.equal(webRTCCalls.length, 2);
+  assert.equal(webRTCCalls[1].sessionId, "session-42");
+  assert.equal(webRTCTransports[1].connectCalls, 1);
+  assert.deepEqual(signaling.sentSignals[1], {
+    type: "ice",
+    sessionId: "session-42",
+    peerId: "viewer-peer",
+    payload: { onboardViewerReady: true },
+  });
+
+  controller.close();
+});
+
+test("webrtc viewer reports data channel reconnect failures", async () => {
+  const { createViewerApp } = await loadViewerModule();
+  const root = createViewerAppRoot();
+  const signaling = createFakeSignalingClient();
+  const webRTCTransports = [
+    createFakeTransport(),
+    createFakeTransport({ rejectConnect: true }),
+  ];
+  const errors = [];
+  let transportIndex = 0;
+
+  const controller = createViewerApp({
+    document: createFakeDocument(root),
+    location: {
+      protocol: "https:",
+      host: "viewer.test",
+      search: "?transport=webrtc&sessionId=session-42",
+    },
+    WebSocketImpl: class FakeWebSocket {},
+    RTCPeerConnectionImpl: class FakeRTCPeerConnection {},
+    createPeerId: () => "viewer-peer",
+    createRelayTransport() {
+      throw new Error("relay should not be used in webrtc mode");
+    },
+    createSignalingClientImpl() {
+      return signaling;
+    },
+    createWebRTCTransport() {
+      const transport = webRTCTransports[transportIndex];
+      transportIndex += 1;
+      return transport;
+    },
+    reportError(error) {
+      errors.push(error);
+    },
+  });
+  await flushAsyncWork();
+
+  signaling.emit({
+    type: "session:joined",
+    sessionId: "session-42",
+    peerId: "viewer-peer",
+    role: "viewer",
+  });
+  await flushAsyncWork();
+
+  webRTCTransports[0].emitStatus("disconnected");
+  await flushAsyncWork();
+
+  assertViewerStatus(root.querySelector("[data-viewer-status]"), "Disconnected");
+  assert.equal(errors.length, 1);
+  assert.match(errors[0].message, /connect failed/i);
+
   controller.close();
 });
 
@@ -571,6 +753,32 @@ test("incoming stroke events render a completed stroke", async () => {
   assert.equal(latestRender(renders).snapshot.strokes[0].complete, true);
 });
 
+test("rapid incoming snapshot events render once on the next animation frame", async () => {
+  const fakeWindow = createFakeWindow();
+  const { transport, renders } = await createFixture({ window: fakeWindow });
+  const initialRenderCount = renders.length;
+
+  transport.emit(makeEvent("board:set-surface", { surface: "greenboard" }));
+  transport.emit(makeStrokeStart("stroke_1", { surface: "greenboard", tool: "chalk" }));
+  transport.emit(
+    makeEvent("stroke:point", {
+      strokeId: "stroke_1",
+      point: { x: 0.75, y: 0.25, pressure: 0.6 },
+    }),
+  );
+  transport.emit(makeEvent("stroke:end", { strokeId: "stroke_1" }));
+
+  assert.equal(renders.length, initialRenderCount);
+  assert.equal(fakeWindow.pendingAnimationFrameCount(), 1);
+
+  fakeWindow.flushAnimationFrame();
+
+  assert.equal(renders.length, initialRenderCount + 1);
+  assert.equal(latestRender(renders).snapshot.surface, "greenboard");
+  assert.equal(latestRender(renders).snapshot.strokes.length, 1);
+  assert.equal(latestRender(renders).snapshot.strokes[0].complete, true);
+});
+
 test("duplicate relay event IDs do not duplicate strokes", async () => {
   const { controller, transport } = await createFixture();
   const event = makeStrokeStart("stroke_duplicate", {}, { id: "evt_duplicate" });
@@ -622,6 +830,60 @@ test("viewer passes current time to renderer so expired ephemeral strokes are hi
   assert.equal(latestRender(renders).options.now, 5_000);
   assert.equal(latestRender(renders).snapshot.strokes[0].ephemeral, true);
   assert.equal(latestRender(renders).snapshot.strokes[0].expiresAt, 1_000);
+});
+
+test("viewer rerenders when the next ephemeral stroke expires", async () => {
+  const timers = createFakeTimers();
+  let currentNow = 1_000;
+  const { transport, renders } = await createFixture({
+    now: () => currentNow,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  });
+  const initialRenderCount = renders.length;
+
+  transport.emit(
+    makeStrokeStart("stroke_fade", {
+      ephemeral: true,
+      expiresAt: 1_300,
+    }),
+  );
+
+  assert.equal(timers.scheduled.length, 1);
+  assert.equal(timers.scheduled[0].delay, 300);
+
+  currentNow = 1_300;
+  timers.runNext();
+
+  assert.equal(renders.length, initialRenderCount + 2);
+  assert.equal(latestRender(renders).options.now, 1_300);
+  assert.equal(timers.scheduled.length, 0);
+});
+
+test("viewer clears a pending ephemeral rerender timer on close", async () => {
+  const timers = createFakeTimers();
+  let currentNow = 1_000;
+  const { controller, transport, renders } = await createFixture({
+    now: () => currentNow,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  });
+
+  transport.emit(
+    makeStrokeStart("stroke_fade", {
+      ephemeral: true,
+      expiresAt: 1_300,
+    }),
+  );
+  assert.equal(timers.scheduled.length, 1);
+
+  const renderCountBeforeClose = renders.length;
+  controller.close();
+  currentNow = 1_300;
+  timers.runNext();
+
+  assert.equal(timers.scheduled.length, 0);
+  assert.equal(renders.length, renderCountBeforeClose);
 });
 
 test("ResizeObserver resize rerenders with the new canvas size", async () => {
@@ -695,6 +957,19 @@ test("close during pending connect keeps the viewer disconnected after stale res
   await assert.rejects(connection, /viewer controller is closed/);
 
   assertViewerStatus(elements.status, "Disconnected");
+});
+
+test("viewer status follows transport reconnect lifecycle", async () => {
+  const { controller, elements, transport } = await createFixture();
+
+  await controller.connect();
+  transport.emitStatus("reconnecting");
+
+  assertViewerStatus(elements.status, "Reconnecting");
+
+  transport.emitStatus("connected");
+
+  assertViewerStatus(elements.status, "Connected");
 });
 
 test("connect after close rejects without reconnecting an unsubscribed controller", async () => {

@@ -301,6 +301,17 @@ async function flushAsyncWork() {
   }
 }
 
+async function assertRejectsSoon(promise, expected) {
+  const timeout = new Promise((_, reject) => {
+    setTimeout(
+      () => reject(new Error("timed out waiting for rejection")),
+      50,
+    );
+  });
+
+  await assert.rejects(Promise.race([promise, timeout]), expected);
+}
+
 function createDeferred() {
   let resolve;
   let reject;
@@ -712,6 +723,32 @@ test("data channel error before open rejects pending connect", async () => {
   await assert.rejects(connection, /DataChannel failed before open/i);
 });
 
+test("signaling error before board data channel open rejects pending connect", async () => {
+  const setup = makeTransport({ role: "board" });
+
+  const connection = setup.transport.connect();
+  const pc = setup.RTCPeerConnectionImpl.instances[0];
+  await flushAsyncWork();
+  setup.signaling.dispatch({ type: "error", error: "unknown session" });
+
+  await assertRejectsSoon(connection, /WebRTC signaling error: unknown session/i);
+  assert.equal(pc.closed, true);
+  assert.equal(pc.channels[0].closed, true);
+  assert.equal(setup.signaling.handlerCount, 0);
+});
+
+test("signaling error before viewer data channel open rejects pending connect", async () => {
+  const setup = makeTransport({ role: "viewer" });
+
+  const connection = setup.transport.connect();
+  const pc = setup.RTCPeerConnectionImpl.instances[0];
+  setup.signaling.dispatch({ type: "error", error: "unknown session" });
+
+  await assertRejectsSoon(connection, /WebRTC signaling error: unknown session/i);
+  assert.equal(pc.closed, true);
+  assert.equal(setup.signaling.handlerCount, 0);
+});
+
 test("peer connection failure before data channel open rejects pending connect", async () => {
   const setup = makeTransport({ role: "board" });
 
@@ -1032,6 +1069,21 @@ test("data channel close after open cleans up peer connection and signaling", as
   assert.equal(pc.closed, true);
   assert.equal(setup.signaling.handlerCount, 0);
   assert.equal(setup.signaling.closed, true);
+});
+
+test("status subscribers see connecting, connected, and disconnected states", async () => {
+  const setup = makeTransport({ role: "board" });
+  const statuses = [];
+
+  const unsubscribe = setup.transport.onStatus((status) => {
+    statuses.push(status);
+  });
+
+  const { channel } = await connectBoardAndOpen(setup);
+  channel.dispatchClose();
+  unsubscribe();
+
+  assert.deepEqual(statuses, ["connecting", "connected", "disconnected"]);
 });
 
 test("peer connection failure after open closes channel and signaling", async () => {

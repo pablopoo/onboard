@@ -90,6 +90,30 @@ function makeEvent(overrides = {}) {
   };
 }
 
+function makeFakeTimers() {
+  const scheduled = [];
+
+  return {
+    scheduled,
+    setTimeout(callback, delay) {
+      const timer = { callback, delay };
+      scheduled.push(timer);
+      return timer;
+    },
+    clearTimeout(timer) {
+      const index = scheduled.indexOf(timer);
+      if (index >= 0) {
+        scheduled.splice(index, 1);
+      }
+    },
+    runNext() {
+      const timer = scheduled.shift();
+      timer?.callback();
+      return timer;
+    },
+  };
+}
+
 test("connect constructs WebSocket with the configured URL", async () => {
   const WebSocketImpl = makeFakeWebSocketClass();
   const transport = createWebSocketRelayTransport({
@@ -235,15 +259,144 @@ test("onEvent returns an unsubscribe function", async () => {
 
 test("close closes the socket", async () => {
   const WebSocketImpl = makeFakeWebSocketClass();
+  const timers = makeFakeTimers();
   const transport = createWebSocketRelayTransport({
     url: "ws://localhost:8080/ws/relay",
     WebSocketImpl,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
   });
 
   await connectAndOpen(transport, WebSocketImpl);
   transport.close();
 
   assert.equal(WebSocketImpl.instances[0].closed, true);
+  assert.equal(timers.scheduled.length, 0);
+});
+
+test("unexpected close reconnects and keeps event handlers active", async () => {
+  const WebSocketImpl = makeFakeWebSocketClass();
+  const timers = makeFakeTimers();
+  const transport = createWebSocketRelayTransport({
+    url: "ws://localhost:8080/ws/relay",
+    WebSocketImpl,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  });
+  const received = [];
+
+  transport.onEvent((event) => received.push(event));
+  await connectAndOpen(transport, WebSocketImpl);
+  WebSocketImpl.instances[0].dispatchClose();
+
+  assert.equal(timers.scheduled.length, 1);
+  assert.equal(timers.scheduled[0].delay, 250);
+
+  timers.runNext();
+  assert.equal(WebSocketImpl.instances.length, 2);
+  const reconnect = transport.connect();
+  WebSocketImpl.instances[1].dispatchOpen();
+  await reconnect;
+
+  const event = makeEvent({ id: "evt_after_reconnect" });
+  WebSocketImpl.instances[1].dispatchMessage(JSON.stringify(event));
+
+  assert.deepEqual(received, [event]);
+});
+
+test("status subscribers see reconnecting and connected around runtime reconnect", async () => {
+  const WebSocketImpl = makeFakeWebSocketClass();
+  const timers = makeFakeTimers();
+  const transport = createWebSocketRelayTransport({
+    url: "ws://localhost:8080/ws/relay",
+    WebSocketImpl,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  });
+  const statuses = [];
+
+  transport.onStatus((status) => statuses.push(status));
+  await connectAndOpen(transport, WebSocketImpl);
+  WebSocketImpl.instances[0].dispatchClose();
+
+  timers.runNext();
+  const reconnect = transport.connect();
+  WebSocketImpl.instances[1].dispatchOpen();
+  await reconnect;
+
+  assert.deepEqual(statuses, ["connecting", "connected", "reconnecting", "connected"]);
+});
+
+test("onStatus returns an unsubscribe function", async () => {
+  const WebSocketImpl = makeFakeWebSocketClass();
+  const transport = createWebSocketRelayTransport({
+    url: "ws://localhost:8080/ws/relay",
+    WebSocketImpl,
+  });
+  const statuses = [];
+  const unsubscribe = transport.onStatus((status) => statuses.push(status));
+
+  unsubscribe();
+  await connectAndOpen(transport, WebSocketImpl);
+
+  assert.deepEqual(statuses, []);
+});
+
+test("send queues events while reconnecting and flushes after reopen", async () => {
+  const WebSocketImpl = makeFakeWebSocketClass();
+  const timers = makeFakeTimers();
+  const transport = createWebSocketRelayTransport({
+    url: "ws://localhost:8080/ws/relay",
+    WebSocketImpl,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  });
+  const event = makeEvent({ id: "evt_queued_while_reconnecting" });
+
+  await connectAndOpen(transport, WebSocketImpl);
+  WebSocketImpl.instances[0].dispatchClose();
+
+  assert.doesNotThrow(() => transport.send(event));
+  assert.deepEqual(WebSocketImpl.instances[0].sent, []);
+
+  timers.runNext();
+  const reconnect = transport.connect();
+  WebSocketImpl.instances[1].dispatchOpen();
+  await reconnect;
+
+  assert.deepEqual(WebSocketImpl.instances[1].sent, [JSON.stringify(event)]);
+});
+
+test("send fails clearly when the reconnect queue is full", async () => {
+  const WebSocketImpl = makeFakeWebSocketClass();
+  const timers = makeFakeTimers();
+  const transport = createWebSocketRelayTransport({
+    url: "ws://localhost:8080/ws/relay",
+    WebSocketImpl,
+    maxQueuedEvents: 2,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  });
+  const first = makeEvent({ id: "evt_queued_1" });
+  const second = makeEvent({ id: "evt_queued_2" });
+  const third = makeEvent({ id: "evt_queued_3" });
+
+  await connectAndOpen(transport, WebSocketImpl);
+  WebSocketImpl.instances[0].dispatchClose();
+
+  assert.doesNotThrow(() => transport.send(first));
+  assert.doesNotThrow(() => transport.send(second));
+  assert.throws(() => transport.send(third), /queue is full/i);
+
+  timers.runNext();
+  const reconnect = transport.connect();
+  WebSocketImpl.instances[1].dispatchOpen();
+  await reconnect;
+
+  assert.deepEqual(WebSocketImpl.instances[1].sent, [
+    JSON.stringify(first),
+    JSON.stringify(second),
+  ]);
 });
 
 test("created transport satisfies assertTransport", () => {

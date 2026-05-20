@@ -76,6 +76,36 @@ test("validateBoardEvent accepts board:set-surface and stroke:expire", () => {
   );
 });
 
+test("validateBoardEvent accepts board:undo with a stroke ID", () => {
+  assert.deepEqual(
+    validateBoardEvent(createBoardEvent("board:undo", { strokeId: "s1" })),
+    { valid: true },
+  );
+});
+
+test("validateBoardEvent accepts board:restore with a board snapshot payload", () => {
+  const event = createBoardEvent("board:restore", {
+    surface: "blackboard",
+    strokes: [
+      {
+        strokeId: "s1",
+        surface: "blackboard",
+        tool: "chalk",
+        color: "#ffffff",
+        width: 4,
+        points: [
+          { x: 0.1, y: 0.2 },
+          { x: 0.3, y: 0.4, pressure: 0.5 },
+        ],
+        complete: true,
+      },
+    ],
+    pointer: { visible: true, point: { x: 0.5, y: 0.6 } },
+  });
+
+  assert.deepEqual(validateBoardEvent(event), { valid: true });
+});
+
 test("validateBoardEvent accepts an ephemeral stroke:start with expiresAt", () => {
   const event = createBoardEvent("stroke:start", {
     strokeId: "stroke_2",
@@ -365,6 +395,34 @@ test("pointer:hide and board:clear reject non-empty payloads", () => {
     const result = validateBoardEvent(makeEvent(type, { extra: true }));
     assert.equal(result.valid, false);
     assert.match(result.reason, /empty payload/i);
+  }
+});
+
+test("board:restore rejects malformed snapshot payloads", () => {
+  const validStroke = {
+    strokeId: "s1",
+    surface: "whiteboard",
+    tool: "marker",
+    color: "#111111",
+    width: 3,
+    points: [{ x: 0.1, y: 0.2 }],
+    complete: true,
+  };
+
+  for (const payload of [
+    {},
+    { surface: "glassboard", strokes: [], pointer: { visible: false, point: null } },
+    { surface: "whiteboard", strokes: {}, pointer: { visible: false, point: null } },
+    { surface: "whiteboard", strokes: [validStroke], pointer: null },
+    { surface: "whiteboard", strokes: [validStroke], pointer: { visible: "no", point: null } },
+    { surface: "whiteboard", strokes: [validStroke], pointer: { visible: true, point: null } },
+    { surface: "whiteboard", strokes: [{ ...validStroke, complete: "yes" }], pointer: { visible: false, point: null } },
+    { surface: "whiteboard", strokes: [{ ...validStroke, points: [] }], pointer: { visible: false, point: null } },
+    { surface: "whiteboard", strokes: [{ ...validStroke, tool: "chalk" }], pointer: { visible: false, point: null } },
+  ]) {
+    const result = validateBoardEvent(makeEvent("board:restore", payload));
+    assert.equal(result.valid, false);
+    assert.match(result.reason, /surface|strokes|stroke|pointer|point|tool|complete/i);
   }
 });
 
