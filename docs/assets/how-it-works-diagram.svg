@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="940" viewBox="0 0 1440 940" role="img" aria-labelledby="title desc">
+  <title id="title">Onboard software architecture component diagram</title>
+  <desc id="desc">Technical component diagram showing Board browser modules, the local Go binary, the in-memory hub, and Viewer browser modules connected by HTTP and WebSocket routes.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#172033"/>
+    </marker>
+    <filter id="shadow" x="-12%" y="-14%" width="124%" height="136%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#111827" flood-opacity="0.12"/>
+    </filter>
+    <style>
+      .page-title{font:850 42px Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#172033}
+      .subtitle{font:400 18px Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#667085}
+      .group-title{font:850 24px Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#172033}
+      .group-sub{font:500 14px Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#667085}
+      .box-title{font:800 17px Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#172033}
+      .box-copy{font:500 13px Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#667085}
+      .route{font:800 13px Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#172033}
+      .tiny{font:700 12px Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#475467}
+    </style>
+  </defs>
+
+  <rect width="1440" height="940" fill="#f7f4ee"/>
+  <rect x="48" y="44" width="1344" height="852" rx="34" fill="#fffaf1" stroke="#e6ded0"/>
+  <text x="92" y="104" class="page-title">Onboard Software Architecture</text>
+  <text x="92" y="136" class="subtitle">Local Go binary + embedded browser app + WebSocket event relay. No cloud service in the core workflow.</text>
+
+  <g filter="url(#shadow)">
+    <rect x="90" y="188" width="360" height="606" rx="28" fill="#ffffff" stroke="#dfe7ef"/>
+    <text x="126" y="236" class="group-title">Board Browser</text>
+    <text x="126" y="260" class="group-sub">/board, presenter-only UI</text>
+
+    <rect x="126" y="300" width="288" height="72" rx="16" fill="#f4f7fb" stroke="#d7e0ea"/>
+    <text x="148" y="329" class="box-title">web/board/board.js</text>
+    <text x="148" y="352" class="box-copy">tools, toolbar, pointer input</text>
+
+    <rect x="126" y="394" width="288" height="72" rx="16" fill="#f4f7fb" stroke="#d7e0ea"/>
+    <text x="148" y="423" class="box-title">createBoardController</text>
+    <text x="148" y="446" class="box-copy">local apply/render + send queue</text>
+
+    <rect x="126" y="488" width="288" height="72" rx="16" fill="#f4f7fb" stroke="#d7e0ea"/>
+    <text x="148" y="517" class="box-title">web/core</text>
+    <text x="148" y="540" class="box-copy">protocol, board-state, renderer</text>
+
+    <rect x="126" y="582" width="288" height="72" rx="16" fill="#f4f7fb" stroke="#d7e0ea"/>
+    <text x="148" y="611" class="box-title">web/transports</text>
+    <text x="148" y="634" class="box-copy">WebSocket relay adapter</text>
+
+    <rect x="126" y="696" width="288" height="48" rx="14" fill="#24594d"/>
+    <text x="270" y="727" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui" font-size="15" font-weight="850" fill="#ffffff">Canvas renders immediately</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="540" y="170" width="360" height="642" rx="28" fill="#172033"/>
+    <text x="576" y="218" font-family="Inter,ui-sans-serif,system-ui" font-size="24" font-weight="850" fill="#ffffff">Go Local Binary</text>
+    <text x="576" y="242" font-family="Inter,ui-sans-serif,system-ui" font-size="14" font-weight="500" fill="#cbd5e1">single executable, embedded assets</text>
+
+    <rect x="576" y="282" width="288" height="72" rx="16" fill="#263447" stroke="#3b4b63"/>
+    <text x="598" y="311" font-family="Inter,ui-sans-serif,system-ui" font-size="17" font-weight="800" fill="#ffffff">cmd/onboard</text>
+    <text x="598" y="334" font-family="Inter,ui-sans-serif,system-ui" font-size="13" font-weight="500" fill="#cbd5e1">startup, bind address, URL print</text>
+
+    <rect x="576" y="376" width="288" height="92" rx="16" fill="#263447" stroke="#3b4b63"/>
+    <text x="598" y="405" font-family="Inter,ui-sans-serif,system-ui" font-size="17" font-weight="800" fill="#ffffff">internal/server</text>
+    <text x="598" y="428" font-family="Inter,ui-sans-serif,system-ui" font-size="13" font-weight="500" fill="#cbd5e1">/, /board, /viewer, /api/share</text>
+    <text x="598" y="450" font-family="Inter,ui-sans-serif,system-ui" font-size="13" font-weight="500" fill="#cbd5e1">/health, /ws/relay</text>
+
+    <rect x="576" y="490" width="288" height="142" rx="16" fill="#f8fafc" stroke="#94a3b8"/>
+    <text x="598" y="519" class="box-title">internal/hub</text>
+    <text x="598" y="542" class="box-copy">event log + current snapshot</text>
+    <text x="598" y="565" class="box-copy">one active Board presenter</text>
+    <text x="598" y="588" class="box-copy">viewer subscriptions + presence</text>
+    <text x="598" y="611" class="box-copy">broadcast to connected clients</text>
+
+    <rect x="576" y="666" width="288" height="72" rx="16" fill="#263447" stroke="#3b4b63"/>
+    <text x="598" y="695" font-family="Inter,ui-sans-serif,system-ui" font-size="17" font-weight="800" fill="#ffffff">web/assets.go</text>
+    <text x="598" y="718" font-family="Inter,ui-sans-serif,system-ui" font-size="13" font-weight="500" fill="#cbd5e1">embeds static browser files</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="990" y="188" width="360" height="606" rx="28" fill="#ffffff" stroke="#dfe7ef"/>
+    <text x="1026" y="236" class="group-title">Viewer Browser</text>
+    <text x="1026" y="260" class="group-sub">/viewer, content-only output</text>
+
+    <rect x="1026" y="300" width="288" height="72" rx="16" fill="#f4f7fb" stroke="#d7e0ea"/>
+    <text x="1048" y="329" class="box-title">web/viewer/viewer.js</text>
+    <text x="1048" y="352" class="box-copy">connection status + fullscreen</text>
+
+    <rect x="1026" y="394" width="288" height="72" rx="16" fill="#f4f7fb" stroke="#d7e0ea"/>
+    <text x="1048" y="423" class="box-title">createViewerController</text>
+    <text x="1048" y="446" class="box-copy">apply incoming events</text>
+
+    <rect x="1026" y="488" width="288" height="72" rx="16" fill="#f4f7fb" stroke="#d7e0ea"/>
+    <text x="1048" y="517" class="box-title">web/core</text>
+    <text x="1048" y="540" class="box-copy">same reducer + canvas renderer</text>
+
+    <rect x="1026" y="582" width="288" height="72" rx="16" fill="#f4f7fb" stroke="#d7e0ea"/>
+    <text x="1048" y="611" class="box-title">web/transports</text>
+    <text x="1048" y="634" class="box-copy">WebSocket relay adapter</text>
+
+    <rect x="1026" y="696" width="288" height="48" rx="14" fill="#164e63"/>
+    <text x="1170" y="727" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui" font-size="15" font-weight="850" fill="#ffffff">Canvas only, no controls</text>
+  </g>
+
+  <path d="M450 354H540" stroke="#172033" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="458" y="312" width="74" height="34" rx="12" fill="#ffffff" stroke="#d7e0ea"/>
+  <text x="495" y="334" text-anchor="middle" class="route">HTTP</text>
+
+  <path d="M450 620H540" stroke="#172033" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="456" y="578" width="82" height="34" rx="12" fill="#ffffff" stroke="#d7e0ea"/>
+  <text x="497" y="600" text-anchor="middle" class="route">WS board</text>
+
+  <path d="M900 354H990" stroke="#172033" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="908" y="312" width="74" height="34" rx="12" fill="#ffffff" stroke="#d7e0ea"/>
+  <text x="945" y="334" text-anchor="middle" class="route">HTTP</text>
+
+  <path d="M990 620H900" stroke="#172033" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="908" y="578" width="86" height="34" rx="12" fill="#ffffff" stroke="#d7e0ea"/>
+  <text x="951" y="600" text-anchor="middle" class="route">WS viewer</text>
+
+  <rect x="198" y="842" width="1044" height="38" rx="19" fill="#f0f5f4" stroke="#d7e7e2"/>
+  <text x="720" y="867" text-anchor="middle" class="tiny">Protocol shape: browser emits drawing events, Go relays and snapshots them, every renderer rebuilds canvas from shared board state.</text>
+</svg>

@@ -6,7 +6,6 @@ import {
   createBoardApp,
   createBoardController,
   createRelayURL,
-  createSignalURL,
 } from "./board.js";
 
 function createFakeElement(properties = {}) {
@@ -258,61 +257,6 @@ function createFakeTransport(options = {}) {
   };
 }
 
-function createFakeSignalingClient(options = {}) {
-  const handlers = new Set();
-  const connection = createDeferred();
-
-  return {
-    connected: false,
-    closed: false,
-    connectCalls: 0,
-    createdSessions: [],
-    joinedSessions: [],
-    sentSignals: [],
-    connect() {
-      this.connectCalls += 1;
-      if (options.deferConnect) {
-        return connection.promise.then(() => {
-          this.connected = true;
-        });
-      }
-
-      if (options.rejectConnect) {
-        return Promise.reject(new Error("signaling connect failed"));
-      }
-
-      this.connected = true;
-      return Promise.resolve();
-    },
-    resolveConnect() {
-      connection.resolve();
-    },
-    createSession(peerId) {
-      this.createdSessions.push(peerId);
-    },
-    joinSession(sessionId, peerId) {
-      this.joinedSessions.push({ sessionId, peerId });
-    },
-    sendSignal(message) {
-      this.sentSignals.push(message);
-    },
-    onMessage(handler) {
-      handlers.add(handler);
-      return () => {
-        handlers.delete(handler);
-      };
-    },
-    emit(message) {
-      for (const handler of handlers) {
-        handler(message);
-      }
-    },
-    close() {
-      this.closed = true;
-    },
-  };
-}
-
 function createFakeTimers() {
   const scheduled = [];
 
@@ -551,22 +495,10 @@ test("createRelayURL maps http and https locations to /ws/relay", () => {
   );
 });
 
-test("createSignalURL maps http and https locations to /signal", () => {
-  assert.equal(
-    createSignalURL({ protocol: "http:", host: "local.test:8080" }),
-    "ws://local.test:8080/signal",
-  );
-  assert.equal(
-    createSignalURL({ protocol: "https:", host: "board.test" }),
-    "wss://board.test/signal",
-  );
-});
-
 test("board app defaults to relay transport", () => {
   const root = createBoardAppRoot();
   const relayTransport = createFakeTransport();
   const relayCalls = [];
-  const signalingCalls = [];
 
   const controller = createBoardApp({
     document: createFakeDocument(root),
@@ -576,22 +508,17 @@ test("board app defaults to relay transport", () => {
       relayCalls.push(options);
       return relayTransport;
     },
-    createSignalingClientImpl(options) {
-      signalingCalls.push(options);
-      return createFakeSignalingClient();
-    },
   });
 
   assert.equal(controller.getSnapshot().surface, "whiteboard");
   assert.equal(relayCalls.length, 1);
   assert.equal(relayCalls[0].url, "ws://local.test:8080/ws/relay?role=board");
   assert.equal(relayTransport.connectCalls, 1);
-  assert.deepEqual(signalingCalls, []);
 
   controller.close();
 });
 
-test("board app honors explicit relay transport mode", () => {
+test("board app ignores stale transport query and uses relay", () => {
   const root = createBoardAppRoot();
   const relayTransport = createFakeTransport();
   const relayCalls = [];
@@ -601,15 +528,12 @@ test("board app honors explicit relay transport mode", () => {
     location: {
       protocol: "https:",
       host: "board.test",
-      search: "?transport=relay",
+      search: "?transport=webrtc&session=old",
     },
     WebSocketImpl: class FakeWebSocket {},
     createRelayTransport(options) {
       relayCalls.push(options);
       return relayTransport;
-    },
-    createSignalingClientImpl() {
-      throw new Error("signaling should not be used in relay mode");
     },
   });
 
@@ -644,396 +568,13 @@ test("board app ignores expected close during a pending relay connection", async
   assert.deepEqual(errors, []);
 });
 
-test("webrtc board creates a session and waits for viewer ready before connecting data channel", async () => {
-  const root = createBoardAppRoot();
-  const signaling = createFakeSignalingClient();
-  const webRTCTransport = createFakeTransport();
-  const signalingCalls = [];
-  const webRTCCalls = [];
-  const errors = [];
-  class FakeRTCPeerConnection {}
-
-  const controller = createBoardApp({
-    document: createFakeDocument(root),
-    location: {
-      protocol: "https:",
-      host: "board.test",
-      search: "?transport=webrtc",
-    },
-    WebSocketImpl: class FakeWebSocket {},
-    RTCPeerConnectionImpl: FakeRTCPeerConnection,
-    createPeerId: () => "board-peer",
-    createRelayTransport() {
-      throw new Error("relay should not be used in webrtc mode");
-    },
-    createSignalingClientImpl(options) {
-      signalingCalls.push(options);
-      return signaling;
-    },
-    createWebRTCTransport(options) {
-      webRTCCalls.push(options);
-      return webRTCTransport;
-    },
-    reportError(error) {
-      errors.push(error);
-    },
-  });
-
-  await flushAsyncWork();
-
-  assert.equal(signalingCalls.length, 1);
-  assert.equal(signalingCalls[0].url, "wss://board.test/signal");
-  assert.equal(signaling.connectCalls, 1);
-  assert.deepEqual(signaling.createdSessions, ["board-peer"]);
-  assert.deepEqual(webRTCCalls, []);
-
-  signaling.emit({
-    type: "session:created",
-    sessionId: "session-42",
-    peerId: "board-peer",
-    role: "board",
-  });
-  await flushAsyncWork();
-
-  assert.match(
-    root.querySelector("[data-board-session]").textContent,
-    /session-42/,
-  );
-  assert.match(
-    root.querySelector("[data-board-session]").textContent,
-    /\/viewer\?transport=webrtc&sessionId=session-42/,
-  );
-  assert.deepEqual(webRTCCalls, []);
-
-  signaling.emit({
-    type: "signal:ice",
-    sessionId: "session-42",
-    peerId: "viewer-peer",
-    payload: { onboardViewerReady: true },
-  });
-  await flushAsyncWork();
-
-  assert.equal(webRTCCalls.length, 1);
-  assert.equal(webRTCCalls[0].signaling, signaling);
-  assert.equal(webRTCCalls[0].role, "board");
-  assert.equal(webRTCCalls[0].sessionId, "session-42");
-  assert.equal(webRTCCalls[0].peerId, "board-peer");
-  assert.equal(webRTCCalls[0].RTCPeerConnectionImpl, FakeRTCPeerConnection);
-  assert.equal(webRTCTransport.connectCalls, 1);
-  assert.deepEqual(errors, []);
-
-  webRTCTransport.emitStatus("disconnected");
-  await flushAsyncWork();
-
-  assert.equal(
-    root.querySelector("[data-board-session]").textContent,
-    "WebRTC reconnecting",
-  );
-
-  controller.close();
-});
-
-test("webrtc board does not expose an incomplete viewer share link before session creation", async () => {
-  const root = createBoardAppRoot();
-  const signaling = createFakeSignalingClient();
-  const copied = [];
-  class FakeRTCPeerConnection {}
-
-  const controller = createBoardApp({
-    document: createFakeDocument(root),
-    location: {
-      protocol: "https:",
-      host: "board.test",
-      search: "?transport=webrtc",
-    },
-    WebSocketImpl: class FakeWebSocket {},
-    RTCPeerConnectionImpl: FakeRTCPeerConnection,
-    createPeerId: () => "board-peer",
-    createRelayTransport() {
-      throw new Error("relay should not be used in webrtc mode");
-    },
-    createSignalingClientImpl() {
-      return signaling;
-    },
-    createWebRTCTransport() {
-      return createFakeTransport();
-    },
-    copyText(value) {
-      copied.push(value);
-      return Promise.resolve();
-    },
-  });
-  await flushAsyncWork();
-
-  const shareLink = root.querySelector("[data-board-share-link]");
-  const shareInput = root.querySelector("[data-board-share-input]");
-  const shareQR = root.querySelector("[data-board-share-qr]");
-  const copyButton = root.querySelector("[data-board-control='copy-viewer']");
-
-  assert.equal(shareLink.href, "");
-  assert.equal(shareLink.attributes.get("aria-disabled"), "true");
-  assert.equal(shareInput.value, "");
-  assert.equal(shareInput.placeholder, "Waiting for viewer link");
-  assert.equal(copyButton.disabled, true);
-  assert.equal(shareQR.childrenList[0].textContent, "Waiting for link");
-
-  copyButton.dispatch("click");
-  await flushAsyncWork();
-  assert.deepEqual(copied, []);
-
-  signaling.emit({
-    type: "session:created",
-    sessionId: "session-42",
-    peerId: "board-peer",
-    role: "board",
-  });
-  await flushAsyncWork();
-
-  const viewerURL =
-    "https://board.test/viewer?transport=webrtc&sessionId=session-42";
-  assert.equal(shareLink.href, viewerURL);
-  assert.equal(shareLink.attributes.get("aria-disabled"), "false");
-  assert.equal(shareInput.value, viewerURL);
-  assert.equal(shareInput.placeholder, "");
-  assert.equal(copyButton.disabled, false);
-
-  copyButton.dispatch("click");
-  await flushAsyncWork();
-  assert.deepEqual(copied, [viewerURL]);
-
-  controller.close();
-});
-
-test("webrtc board reconnects data channel after established disconnect", async () => {
-  const root = createBoardAppRoot();
-  const signaling = createFakeSignalingClient();
-  const webRTCTransports = [createFakeTransport(), createFakeTransport()];
-  const webRTCCalls = [];
-
-  const controller = createBoardApp({
-    document: createFakeDocument(root),
-    location: {
-      protocol: "https:",
-      host: "board.test",
-      search: "?transport=webrtc",
-    },
-    WebSocketImpl: class FakeWebSocket {},
-    RTCPeerConnectionImpl: class FakeRTCPeerConnection {},
-    createPeerId: () => "board-peer",
-    createRelayTransport() {
-      throw new Error("relay should not be used in webrtc mode");
-    },
-    createSignalingClientImpl() {
-      return signaling;
-    },
-    createWebRTCTransport(options) {
-      webRTCCalls.push(options);
-      return webRTCTransports[webRTCCalls.length - 1];
-    },
-  });
-  await flushAsyncWork();
-
-  signaling.emit({
-    type: "session:created",
-    sessionId: "session-42",
-    peerId: "board-peer",
-    role: "board",
-  });
-  await flushAsyncWork();
-  signaling.emit({
-    type: "signal:ice",
-    sessionId: "session-42",
-    peerId: "viewer-peer",
-    payload: { onboardViewerReady: true },
-  });
-  await flushAsyncWork();
-
-  assert.equal(webRTCCalls.length, 1);
-  assert.equal(webRTCTransports[0].connectCalls, 1);
-
-  webRTCTransports[0].emitStatus("disconnected");
-  await flushAsyncWork();
-
-  assert.equal(
-    root.querySelector("[data-board-session]").textContent,
-    "WebRTC reconnecting",
-  );
-
-  signaling.emit({
-    type: "signal:ice",
-    sessionId: "session-42",
-    peerId: "viewer-peer",
-    payload: { onboardViewerReady: true },
-  });
-  await flushAsyncWork();
-
-  assert.equal(webRTCCalls.length, 2);
-  assert.equal(webRTCCalls[1].sessionId, "session-42");
-  assert.equal(webRTCTransports[1].connectCalls, 1);
-  assert.match(
-    root.querySelector("[data-board-session]").textContent,
-    /session-42/,
-  );
-  assert.match(
-    root.querySelector("[data-board-session]").textContent,
-    /\/viewer\?transport=webrtc&sessionId=session-42/,
-  );
-
-  controller.close();
-});
-
-test("webrtc board reconnects when signaling reports the viewer left", async () => {
-  const root = createBoardAppRoot();
-  const signaling = createFakeSignalingClient();
-  const webRTCTransports = [createFakeTransport(), createFakeTransport()];
-  const webRTCCalls = [];
-
-  const controller = createBoardApp({
-    document: createFakeDocument(root),
-    location: {
-      protocol: "https:",
-      host: "board.test",
-      search: "?transport=webrtc",
-    },
-    WebSocketImpl: class FakeWebSocket {},
-    RTCPeerConnectionImpl: class FakeRTCPeerConnection {},
-    createPeerId: () => "board-peer",
-    createRelayTransport() {
-      throw new Error("relay should not be used in webrtc mode");
-    },
-    createSignalingClientImpl() {
-      return signaling;
-    },
-    createWebRTCTransport(options) {
-      webRTCCalls.push(options);
-      return webRTCTransports[webRTCCalls.length - 1];
-    },
-  });
-  await flushAsyncWork();
-
-  signaling.emit({
-    type: "session:created",
-    sessionId: "session-42",
-    peerId: "board-peer",
-    role: "board",
-  });
-  await flushAsyncWork();
-  signaling.emit({
-    type: "signal:ice",
-    sessionId: "session-42",
-    peerId: "viewer-peer",
-    payload: { onboardViewerReady: true },
-  });
-  await flushAsyncWork();
-
-  signaling.emit({
-    type: "session:peer-left",
-    sessionId: "session-42",
-    peerId: "viewer-peer",
-    payload: { role: "viewer" },
-  });
-  await flushAsyncWork();
-
-  assert.equal(
-    root.querySelector("[data-board-session]").textContent,
-    "WebRTC reconnecting",
-  );
-  assert.equal(webRTCTransports[0].closed, true);
-
-  signaling.emit({
-    type: "signal:ice",
-    sessionId: "session-42",
-    peerId: "viewer-peer-2",
-    payload: { onboardViewerReady: true },
-  });
-  await flushAsyncWork();
-
-  assert.equal(webRTCCalls.length, 2);
-  assert.equal(webRTCCalls[1].sessionId, "session-42");
-  assert.equal(webRTCTransports[1].connectCalls, 1);
-
-  controller.close();
-});
-
-test("webrtc board reports data channel reconnect failures", async () => {
-  const root = createBoardAppRoot();
-  const signaling = createFakeSignalingClient();
-  const webRTCTransports = [
-    createFakeTransport(),
-    createFakeTransport({ rejectConnect: true }),
-  ];
-  const errors = [];
-  let transportIndex = 0;
-
-  const controller = createBoardApp({
-    document: createFakeDocument(root),
-    location: {
-      protocol: "https:",
-      host: "board.test",
-      search: "?transport=webrtc",
-    },
-    WebSocketImpl: class FakeWebSocket {},
-    RTCPeerConnectionImpl: class FakeRTCPeerConnection {},
-    createPeerId: () => "board-peer",
-    createRelayTransport() {
-      throw new Error("relay should not be used in webrtc mode");
-    },
-    createSignalingClientImpl() {
-      return signaling;
-    },
-    createWebRTCTransport() {
-      const transport = webRTCTransports[transportIndex];
-      transportIndex += 1;
-      return transport;
-    },
-    reportError(error) {
-      errors.push(error);
-    },
-  });
-  await flushAsyncWork();
-
-  signaling.emit({
-    type: "session:created",
-    sessionId: "session-42",
-    peerId: "board-peer",
-    role: "board",
-  });
-  await flushAsyncWork();
-  signaling.emit({
-    type: "signal:ice",
-    sessionId: "session-42",
-    peerId: "viewer-peer",
-    payload: { onboardViewerReady: true },
-  });
-  await flushAsyncWork();
-
-  webRTCTransports[0].emitStatus("disconnected");
-  await flushAsyncWork();
-  signaling.emit({
-    type: "signal:ice",
-    sessionId: "session-42",
-    peerId: "viewer-peer",
-    payload: { onboardViewerReady: true },
-  });
-  await flushAsyncWork();
-
-  assert.equal(
-    root.querySelector("[data-board-session]").textContent,
-    "WebRTC disconnected",
-  );
-  assert.equal(errors.length, 1);
-  assert.match(errors[0].message, /connect failed/i);
-
-  controller.close();
-});
-
-test("index HTML exposes relay and WebRTC flow links", async () => {
+test("index HTML exposes only the local relay flow", async () => {
   const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
 
   assert.match(html, /href="\/board"/);
   assert.match(html, /href="\/viewer"/);
-  assert.match(html, /href="\/board\?transport=webrtc"/);
-  assert.match(html, /href="\/viewer\?transport=webrtc"/);
+  assert.doesNotMatch(html, /transport=webrtc/);
+  assert.doesNotMatch(html, /WebRTC/);
 });
 
 test("local publish uses a board-specific ID when relay snapshot already has evt_000001", async () => {
@@ -1415,7 +956,7 @@ test("clear button requires confirmation before clearing local state", async () 
 
   assert.notEqual(transport.sent.at(-1).type, "board:clear");
   assert.equal(controller.getSnapshot().strokes.length, 1);
-  assert.equal(elements.clearButton.textContent, "Confirm");
+  assert.equal(elements.clearButton.textContent, "Clear?");
   assert.equal(elements.clearButton.classList.contains("is-armed"), true);
   assert.equal(
     elements.clearButton.attributes.get("aria-label"),
@@ -1555,11 +1096,11 @@ test("more panel exposes and copies the viewer share link", async () => {
   assert.deepEqual(copied, ["http://local.test:8080/viewer"]);
   assert.equal(elements.copyViewerButton.textContent, "Copied");
 
-  controller.setViewerURL("http://local.test:8080/viewer?transport=webrtc&sessionId=session-42");
+  controller.setViewerURL("http://local.test:8080/viewer?board=secondary");
 
   assert.equal(
     elements.shareViewerInput.value,
-    "http://local.test:8080/viewer?transport=webrtc&sessionId=session-42",
+    "http://local.test:8080/viewer?board=secondary",
   );
   assert.notEqual(
     elements.shareViewerQR.childrenList[0].childrenList[1].attributes.get("d"),
@@ -1581,7 +1122,7 @@ test("more panel keeps the viewer share URL when it is too long for a QR code", 
   });
   await controller.connect();
 
-  const longViewerURL = `https://hosted.example.test/viewer?transport=webrtc&sessionId=${"a".repeat(150)}`;
+  const longViewerURL = `http://local.test:8080/viewer?note=${"a".repeat(150)}`;
 
   controller.setViewerURL(longViewerURL);
 
@@ -1715,6 +1256,35 @@ test("mobile toolbar collapses after compact tool choices", async () => {
   elements.ephemeralToggle.checked = true;
   elements.ephemeralToggle.dispatch("change");
   assert.equal(elements.root.classList.contains("is-toolbar-collapsed"), true);
+});
+
+test("desktop toolbar can be minimized and reopened from the compact dock", async () => {
+  const fakeWindow = createFakeWindow();
+  const { controller, elements } = createFixture({ window: fakeWindow });
+
+  await controller.connect();
+
+  assert.equal(elements.root.classList.contains("is-toolbar-collapsed"), false);
+  assert.equal(
+    elements.toolbarToggleButton.attributes.get("aria-expanded"),
+    "true",
+  );
+
+  elements.toolbarCloseButton.dispatch("click");
+
+  assert.equal(elements.root.classList.contains("is-toolbar-collapsed"), true);
+  assert.equal(
+    elements.toolbarToggleButton.attributes.get("aria-expanded"),
+    "false",
+  );
+
+  elements.toolbarToggleButton.dispatch("click");
+
+  assert.equal(elements.root.classList.contains("is-toolbar-collapsed"), false);
+  assert.equal(
+    elements.toolbarToggleButton.attributes.get("aria-expanded"),
+    "true",
+  );
 });
 
 test("mobile collapsed dock shows current ink color and fade state", async () => {

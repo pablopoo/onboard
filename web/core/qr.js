@@ -188,10 +188,10 @@ function reserveFormatAreas(reserved) {
   reserved[7][8] = true;
 
   for (let index = 0; index < 8; index += 1) {
-    reserved[QR_SIZE - 1 - index][8] = true;
+    reserved[8][QR_SIZE - 1 - index] = true;
   }
   for (let index = 8; index < 15; index += 1) {
-    reserved[8][QR_SIZE - 15 + index] = true;
+    reserved[QR_SIZE - 15 + index][8] = true;
   }
 }
 

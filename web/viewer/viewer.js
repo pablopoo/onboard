@@ -7,11 +7,9 @@ import {
   renderBoardState as defaultRenderBoardState,
   resizeCanvasToDisplaySize as defaultResizeCanvasToDisplaySize,
 } from "../core/canvas-renderer.js";
-import { createSignalingClient } from "../transports/signaling-client.js";
-import { createWebRTCDataChannelTransport } from "../transports/webrtc-datachannel-transport.js";
 import { createWebSocketRelayTransport } from "../transports/websocket-relay-transport.js";
 
-const VIEWER_READY_SIGNAL_PAYLOAD = { onboardViewerReady: true };
+const CONNECTED_STATUS_VISIBLE_MS = 12_000;
 
 export function createRelayURL(location, role = "") {
   const base = `${location.protocol}//${location.host}`;
@@ -21,17 +19,6 @@ export function createRelayURL(location, role = "") {
     url.searchParams.set("role", role);
   }
   return url.href;
-}
-
-export function createSignalURL(location) {
-  const base = `${location.protocol}//${location.host}`;
-  const url = new URL("/signal", base);
-  url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  return url.href;
-}
-
-export function createPeerId(prefix = "peer") {
-  return `${prefix}-${createIdPart()}`;
 }
 
 export function createViewerController({
@@ -60,6 +47,7 @@ export function createViewerController({
   let connectionGeneration = 0;
   let pendingRenderFrame = null;
   let ephemeralRenderTimer = null;
+  let statusHideTimer = null;
   let closed = false;
 
   const unsubscribe = transport.onEvent((event) => {
@@ -91,6 +79,7 @@ export function createViewerController({
       cleanupResizeRendering();
       cancelScheduledRender();
       clearEphemeralRenderTimer();
+      clearStatusHideTimer();
       connectionState = "closed";
       connectionPromise = null;
       updateStatus("Disconnected");
@@ -265,12 +254,30 @@ export function createViewerController({
 
   function updateStatus(message) {
     if (elements.status) {
+      clearStatusHideTimer();
       if (elements.status.dataset) {
         elements.status.dataset.viewerConnection = message;
       }
       elements.status.setAttribute?.("data-viewer-connection", message);
-      elements.status.hidden = message === "Connected";
-      elements.status.textContent = message === "Connected" ? "" : message;
+      elements.status.hidden = false;
+      elements.status.textContent = message;
+
+      if (message === "Connected") {
+        statusHideTimer = setTimer?.(() => {
+          statusHideTimer = null;
+          if (elements.status) {
+            elements.status.hidden = true;
+          }
+        }, CONNECTED_STATUS_VISIBLE_MS) ?? null;
+        statusHideTimer?.unref?.();
+      }
+    }
+  }
+
+  function clearStatusHideTimer() {
+    if (statusHideTimer !== null) {
+      clearTimer?.(statusHideTimer);
+      statusHideTimer = null;
     }
   }
 
@@ -309,12 +316,10 @@ export function createViewerController({
 export function createViewerApp({
   document = globalThis.document,
   location = globalThis.location,
+  fullscreenDocument = globalThis.document,
   WebSocketImpl = globalThis.WebSocket,
-  RTCPeerConnectionImpl = globalThis.RTCPeerConnection,
   createRelayTransport = createWebSocketRelayTransport,
-  createSignalingClientImpl = createSignalingClient,
-  createWebRTCTransport = createWebRTCDataChannelTransport,
-  createPeerId: createPeerIdImpl = createPeerId,
+  wakeLockNavigator = globalThis.navigator,
   reportError = defaultReportError,
 } = {}) {
   const root = document?.querySelector?.("#viewer-app");
@@ -322,23 +327,10 @@ export function createViewerApp({
     return null;
   }
 
-  const mode = transportModeForLocation(location);
-  const transport =
-    mode === "webrtc"
-      ? createViewerWebRTCSetupTransport({
-          location,
-          WebSocketImpl,
-          RTCPeerConnectionImpl,
-          createSignalingClientImpl,
-          createWebRTCTransport,
-          sessionId: sessionIdForLocation(location),
-          peerId: createPeerIdImpl("viewer"),
-          reportError,
-        })
-      : createRelayTransport({
-          url: createRelayURL(location, "viewer"),
-          WebSocketImpl,
-        });
+  const transport = createRelayTransport({
+    url: createRelayURL(location, "viewer"),
+    WebSocketImpl,
+  });
   const controller = createViewerController({
     elements: {
       canvas: root.querySelector("[data-viewer-canvas]"),
@@ -350,282 +342,187 @@ export function createViewerApp({
   controller.connect().catch((error) => {
     reportError(error);
   });
+  setupViewerFullscreenButton({
+    root,
+    button: root.querySelector("[data-viewer-fullscreen]"),
+    installHint: root.querySelector("[data-viewer-install-hint]"),
+    document: fullscreenDocument,
+    navigator: wakeLockNavigator,
+    reportError,
+  });
 
   return controller;
 }
 
-function createViewerWebRTCSetupTransport({
-  location,
-  WebSocketImpl,
-  RTCPeerConnectionImpl,
-  createSignalingClientImpl,
-  createWebRTCTransport,
-  sessionId,
-  peerId,
+function setupViewerFullscreenButton({
+  root,
+  button,
+  installHint,
+  document,
+  navigator,
   reportError,
 }) {
-  const handlers = new Set();
-  const statusHandlers = new Set();
-  const realUnsubscribers = new Map();
-  const pendingRejects = new Set();
-  let signaling = null;
-  let realTransport = null;
-  let unsubscribeRealStatus = null;
-  let connectPromise = null;
-  let reconnectPromise = null;
-  let closed = false;
-  let lastStatus = null;
+  if (!button) {
+    return;
+  }
 
-  return {
-    connect() {
-      if (closed) {
-        return Promise.reject(new Error("WebRTC viewer transport is closed"));
-      }
+  let wakeLock = null;
+  const standaloneDisplay = isStandaloneDisplay(navigator);
 
-      if (!sessionId) {
-        return Promise.reject(
-          new Error("WebRTC viewer mode requires sessionId in the URL"),
-        );
-      }
+  setupWakeLockLifecycle({
+    requireFullscreen: !standaloneDisplay,
+  });
 
-      if (connectPromise) {
-        return connectPromise;
-      }
+  if (isStandaloneDisplay(navigator)) {
+    button.hidden = true;
+    requestScreenWakeLock({ requireFullscreen: false });
+    return;
+  }
 
-      connectPromise = connectWebRTC().catch((error) => {
-        connectPromise = null;
-        if (!closed) {
-          closeResources();
-        }
-        throw error;
-      });
-      return connectPromise;
-    },
-    send(event) {
-      if (!realTransport) {
-        throw new Error("WebRTC transport must be open before sending events");
-      }
-      realTransport.send(event);
-    },
-    onEvent(handler) {
-      handlers.add(handler);
-      attachHandler(handler);
+  const fullscreenTarget =
+    getFullscreenRequest(root) ? root : document?.documentElement;
+  const canEnterFullscreen = Boolean(getFullscreenRequest(fullscreenTarget));
+  if (!canEnterFullscreen) {
+    button.hidden = false;
+    button.dataset.viewerFullscreenUnsupported = "true";
+    button.title = "Install from Safari to hide browser controls";
+    button.setAttribute?.(
+      "aria-label",
+      "Show iPhone install instructions",
+    );
+    button.addEventListener?.("click", () => {
+      showInstallHint();
+    });
+    return;
+  }
 
-      return () => {
-        handlers.delete(handler);
-        const unsubscribe = realUnsubscribers.get(handler);
-        unsubscribe?.();
-        realUnsubscribers.delete(handler);
-      };
-    },
-    onStatus(handler) {
-      statusHandlers.add(handler);
+  button.hidden = false;
+  button.dataset.viewerFullscreenUnsupported = "false";
 
-      return () => {
-        statusHandlers.delete(handler);
-      };
-    },
-    close() {
-      if (closed) {
+  button.addEventListener?.("click", () => {
+    toggleFullscreen().catch((error) => {
+      reportError(error);
+      showInstallHint();
+    });
+  });
+
+  async function toggleFullscreen() {
+    if (isFullscreenActive()) {
+      await exitFullscreen();
+      await releaseScreenWakeLock();
+      return;
+    }
+
+    const request = getFullscreenRequest(fullscreenTarget);
+    await request.call(fullscreenTarget);
+    await requestScreenWakeLock({ requireFullscreen: true });
+  }
+
+  async function exitFullscreen() {
+    const exit =
+      document?.exitFullscreen ?? document?.webkitExitFullscreen ?? null;
+    if (typeof exit === "function") {
+      await exit.call(document);
+    }
+  }
+
+  function handleFullscreenChange() {
+    if (isFullscreenActive()) {
+      requestScreenWakeLock({ requireFullscreen: true });
+      return;
+    }
+
+    releaseScreenWakeLock();
+  }
+
+  function isFullscreenActive() {
+    return Boolean(
+      document?.fullscreenElement ?? document?.webkitFullscreenElement ?? null,
+    );
+  }
+
+  function setupWakeLockLifecycle({ requireFullscreen }) {
+    document?.addEventListener?.("fullscreenchange", handleFullscreenChange);
+    document?.addEventListener?.(
+      "webkitfullscreenchange",
+      handleFullscreenChange,
+    );
+    document?.addEventListener?.("visibilitychange", () => {
+      if (document?.visibilityState === "hidden") {
+        releaseScreenWakeLock();
         return;
       }
 
-      closed = true;
-      rejectPendingWaits(new Error("WebRTC viewer transport closed before open"));
-      closeResources();
-    },
-  };
-
-  async function connectWebRTC() {
-    emitStatus("connecting");
-    signaling = createSignalingClientImpl({
-      url: createSignalURL(location),
-      WebSocketImpl,
+      requestScreenWakeLock({ requireFullscreen });
     });
-    await signaling.connect();
-    throwIfClosed();
 
-    const sessionJoined = waitForSignalingMessage((message) => {
-      return (
-        message.type === "session:joined" &&
-        message.sessionId === sessionId &&
-        message.peerId === peerId &&
-        message.role === "viewer"
-      );
-    });
-    signaling.joinSession(sessionId, peerId);
-    await sessionJoined;
-    throwIfClosed();
-
-    await connectRealTransport();
-  }
-
-  async function connectRealTransport() {
-    realTransport = createWebRTCTransport({
-      signaling,
-      role: "viewer",
-      sessionId,
-      peerId,
-      RTCPeerConnectionImpl,
-      closeSignalingOnClose: false,
-    });
-    attachHandlers();
-    attachStatusHandler();
-    const realConnection = realTransport.connect();
-    signaling.sendSignal({
-      type: "ice",
-      sessionId,
-      peerId,
-      payload: VIEWER_READY_SIGNAL_PAYLOAD,
-    });
-    await realConnection;
-    emitStatus("connected");
-  }
-
-  function waitForSignalingMessage(predicate) {
-    return new Promise((resolve, reject) => {
-      let unsubscribe = () => {};
-
-      function cleanup() {
-        unsubscribe();
-        pendingRejects.delete(rejectWithCleanup);
-      }
-
-      function rejectWithCleanup(error) {
-        cleanup();
-        reject(error);
-      }
-
-      pendingRejects.add(rejectWithCleanup);
-      unsubscribe = signaling.onMessage((message) => {
-        if (message.type === "error") {
-          rejectWithCleanup(
-            new Error(`WebRTC signaling error: ${message.error}`),
-          );
-          return;
-        }
-
-        if (predicate(message)) {
-          cleanup();
-          resolve(message);
-        }
+    for (const eventName of ["pointerdown", "touchstart", "click"]) {
+      root?.addEventListener?.(eventName, () => {
+        requestScreenWakeLock({ requireFullscreen });
       });
-    });
-  }
-
-  function attachHandlers() {
-    for (const handler of handlers) {
-      attachHandler(handler);
     }
   }
 
-  function attachStatusHandler() {
+  async function requestScreenWakeLock({ requireFullscreen } = {}) {
     if (
-      unsubscribeRealStatus ||
-      !realTransport ||
-      typeof realTransport.onStatus !== "function"
+      wakeLock ||
+      (requireFullscreen && !isFullscreenActive()) ||
+      document?.visibilityState === "hidden"
     ) {
-      return;
+      return false;
     }
 
-    unsubscribeRealStatus = realTransport.onStatus(handleRealTransportStatus);
-  }
-
-  function handleRealTransportStatus(status) {
-    if (status === "disconnected" || status === "closed") {
-      startReconnect();
-      return;
+    const request = navigator?.wakeLock?.request;
+    if (typeof request !== "function") {
+      return false;
     }
 
-    emitStatus(status);
-  }
-
-  function attachHandler(handler) {
-    if (!realTransport || realUnsubscribers.has(handler)) {
-      return;
-    }
-
-    realUnsubscribers.set(handler, realTransport.onEvent(handler));
-  }
-
-  function rejectPendingWaits(error) {
-    for (const rejectPending of Array.from(pendingRejects)) {
-      rejectPending(error);
-    }
-    pendingRejects.clear();
-  }
-
-  function closeResources() {
-    reconnectPromise = null;
-    cleanupRealTransport();
-
-    signaling?.close();
-    signaling = null;
-  }
-
-  function cleanupRealTransport({ close = true } = {}) {
-    unsubscribeRealStatus?.();
-    unsubscribeRealStatus = null;
-
-    for (const unsubscribe of realUnsubscribers.values()) {
-      unsubscribe();
-    }
-    realUnsubscribers.clear();
-
-    if (close) {
-      realTransport?.close();
-    }
-    realTransport = null;
-  }
-
-  function throwIfClosed() {
-    if (closed) {
-      throw new Error("WebRTC viewer transport is closed");
-    }
-  }
-
-  function emitStatus(status) {
-    if (status === lastStatus) {
-      return;
-    }
-
-    lastStatus = status;
-    for (const handler of statusHandlers) {
-      handler(status);
-    }
-  }
-
-  function startReconnect() {
-    if (closed || reconnectPromise || !signaling) {
-      return;
-    }
-
-    emitStatus("reconnecting");
-    cleanupRealTransport({ close: false });
-
-    reconnectPromise = connectRealTransport()
-      .catch((error) => {
-        if (!closed) {
-          emitStatus("disconnected");
-          reportError?.(error);
+    try {
+      const sentinel = await request.call(navigator.wakeLock, "screen");
+      wakeLock = sentinel;
+      sentinel?.addEventListener?.("release", () => {
+        if (wakeLock === sentinel) {
+          wakeLock = null;
         }
-        throw error;
-      })
-      .catch(() => {})
-      .finally(() => {
-        reconnectPromise = null;
       });
+      return true;
+    } catch {
+      wakeLock = null;
+      return false;
+    }
+  }
+
+  async function releaseScreenWakeLock() {
+    const sentinel = wakeLock;
+    wakeLock = null;
+    if (typeof sentinel?.release === "function") {
+      try {
+        await sentinel.release();
+      } catch {
+        // Browsers may auto-release wake locks when visibility changes.
+      }
+    }
+  }
+
+  function showInstallHint() {
+    if (!installHint) {
+      return;
+    }
+
+    installHint.hidden = false;
   }
 }
 
-function transportModeForLocation(location) {
-  const searchParams = new URLSearchParams(location?.search ?? "");
-  return searchParams.get("transport") === "webrtc" ? "webrtc" : "relay";
+function getFullscreenRequest(element) {
+  return element?.requestFullscreen ?? element?.webkitRequestFullscreen ?? null;
 }
 
-function sessionIdForLocation(location) {
-  const searchParams = new URLSearchParams(location?.search ?? "");
-  return searchParams.get("sessionId")?.trim() ?? "";
+function isStandaloneDisplay(navigator) {
+  return (
+    navigator?.standalone === true ||
+    globalThis.matchMedia?.("(display-mode: standalone)")?.matches === true ||
+    globalThis.matchMedia?.("(display-mode: fullscreen)")?.matches === true
+  );
 }
 
 function createIdPart() {

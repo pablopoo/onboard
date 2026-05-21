@@ -132,13 +132,6 @@ await page.context().route("**/favicon.ico", (route) =>
   route.fulfill({ status: 204, body: "" }),
 );
 
-function withSearchParams(rawURL, params) {
-  const query = Object.entries(params)
-    .map(([name, value]) => `${name}=${encodeURIComponent(String(value))}`)
-    .join("&");
-  return `${rawURL}${rawURL.includes("?") ? "&" : "?"}${query}`;
-}
-
 async function createBrowserContext(options = {}) {
   const browser = page.context().browser();
   if (!browser) {
@@ -578,73 +571,6 @@ async function clearBoardCanvas(targetPage) {
   await collapseToolbarIfCompactExpanded(targetPage);
 }
 
-async function waitForBoardWebRTCSession(targetPage) {
-  const deadline = Date.now() + 10000;
-  let latestText = "";
-
-  while (Date.now() < deadline) {
-    latestText = await targetPage.evaluate(
-      () => document.querySelector("[data-board-session]")?.textContent ?? "",
-    );
-    const match = latestText.match(/WebRTC session\s+([^\s.]+)/);
-    if (match?.[1]) {
-      return match[1];
-    }
-
-    await targetPage.waitForTimeout(100);
-  }
-
-  throw new Error(
-    `WebRTC Board did not publish a session ID. Latest status: ${latestText}`,
-  );
-}
-
-async function waitForViewerConnected(targetPage, label, timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
-  let latestStatus = "";
-
-  while (Date.now() < deadline) {
-    latestStatus = await targetPage.evaluate(
-      () => document.querySelector("[data-viewer-status]")?.dataset
-        ?.viewerConnection ?? "",
-    );
-    if (latestStatus === "Connected") {
-      return;
-    }
-
-    await targetPage.waitForTimeout(100);
-  }
-
-  throw new Error(
-    `${label} did not report Connected. Latest status: ${latestStatus}`,
-  );
-}
-
-async function waitForBoardStatusIncludes(
-  targetPage,
-  expectedText,
-  label,
-  timeoutMs = 10000,
-) {
-  const deadline = Date.now() + timeoutMs;
-  let latestStatus = "";
-
-  while (Date.now() < deadline) {
-    latestStatus = await targetPage.evaluate(
-      () => document.querySelector("[data-board-session]")?.textContent ?? "",
-    );
-    if (latestStatus.includes(expectedText)) {
-      return;
-    }
-
-    await targetPage.waitForTimeout(100);
-  }
-
-  throw new Error(
-    `${label} did not include "${expectedText}". Latest status: ${latestStatus}`,
-  );
-}
-
 async function installRelaySocketProbe(targetPage) {
   await targetPage.addInitScript(() => {
     const NativeWebSocket = window.WebSocket;
@@ -769,117 +695,6 @@ async function forceRelayReconnect(targetPage, label) {
     beforeTotal,
     { timeout: 10000 },
   );
-}
-
-async function installWebRTCDataChannelProbe(targetPage) {
-  await targetPage.addInitScript(() => {
-    if (window.__onboardWebRTCDataChannelProbe) {
-      return;
-    }
-
-    const NativeRTCPeerConnection = window.RTCPeerConnection;
-    const channels = [];
-    const tracked = new WeakSet();
-
-    function trackChannel(channel) {
-      if (!channel || tracked.has(channel)) {
-        return;
-      }
-
-      tracked.add(channel);
-      const entry = {
-        channel,
-        label: String(channel.label ?? ""),
-        opened: channel.readyState === "open",
-        closed: channel.readyState === "closed",
-      };
-      channels.push(entry);
-
-      channel.addEventListener("open", () => {
-        entry.opened = true;
-        entry.closed = false;
-      });
-      channel.addEventListener("close", () => {
-        entry.closed = true;
-      });
-    }
-
-    class ProbedRTCPeerConnection extends NativeRTCPeerConnection {
-      constructor(...args) {
-        super(...args);
-        this.addEventListener("datachannel", (event) => {
-          trackChannel(event.channel);
-        });
-      }
-
-      createDataChannel(label, ...args) {
-        const channel = super.createDataChannel(label, ...args);
-        trackChannel(channel);
-        return channel;
-      }
-    }
-
-    window.RTCPeerConnection = ProbedRTCPeerConnection;
-    window.__onboardWebRTCDataChannelProbe = {
-      closeOpenChannels() {
-        let closed = 0;
-        for (const entry of channels) {
-          if (entry.channel.readyState === "open") {
-            entry.channel.close();
-            closed += 1;
-          }
-        }
-        return closed;
-      },
-      totalCount() {
-        return channels.length;
-      },
-      openCount() {
-        return channels.filter(
-          (entry) =>
-            entry.opened &&
-            !entry.closed &&
-            entry.channel.readyState === "open",
-        ).length;
-      },
-      closedCount() {
-        return channels.filter((entry) => entry.closed).length;
-      },
-    };
-  });
-}
-
-async function webRTCProbeTotal(targetPage) {
-  return targetPage.evaluate(
-    () => window.__onboardWebRTCDataChannelProbe?.totalCount() ?? 0,
-  );
-}
-
-async function waitForWebRTCProbeOpen(targetPage, minimumTotal = 1) {
-  await targetPage.waitForFunction(
-    (minimum) => {
-      const probe = window.__onboardWebRTCDataChannelProbe;
-      return Boolean(
-        probe && probe.totalCount() >= minimum && probe.openCount() >= 1,
-      );
-    },
-    minimumTotal,
-    { timeout: 15000 },
-  );
-}
-
-async function forceWebRTCReconnect(targetPage, label) {
-  const beforeTotal = await webRTCProbeTotal(targetPage);
-  const closed = await targetPage.evaluate(
-    () => window.__onboardWebRTCDataChannelProbe?.closeOpenChannels() ?? 0,
-  );
-
-  if (closed < 1) {
-    throw new Error(`${label} had no open WebRTC data channel to close.`);
-  }
-
-  await waitForWebRTCProbeOpen(targetPage, beforeTotal + 1);
-  return beforeTotal;
 }
 
 await checkWithoutConsoleErrors("Home share links", async () => {
@@ -1595,105 +1410,6 @@ await checkWithoutConsoleErrors("Late viewer receives current board state", asyn
   }
 });
 
-await checkWithoutConsoleErrors("WebRTC board and viewer drawing sync", async () => {
-  const webRTCBoardUrl = withSearchParams(boardUrl, { transport: "webrtc" });
-  await page.setViewportSize({ width: 1000, height: 700 });
-  await installWebRTCDataChannelProbe(page);
-  await page.goto(webRTCBoardUrl, { waitUntil: "domcontentloaded" });
-  await page.waitForSelector("[data-board-canvas]", { timeout: 5000 });
-
-  const sessionId = await waitForBoardWebRTCSession(page);
-  if (!sessionId) {
-    throw new Error("WebRTC Board did not publish a session ID.");
-  }
-
-  const webRTCViewerUrl = withSearchParams(viewerUrl, {
-    transport: "webrtc",
-    sessionId,
-  });
-  const viewerPage = await page.context().newPage();
-  try {
-    await checkPageWithoutConsoleErrors(viewerPage, "WebRTC paired viewer", async () => {
-      await installWebRTCDataChannelProbe(viewerPage);
-      await viewerPage.setViewportSize({ width: 1000, height: 700 });
-      await viewerPage.goto(webRTCViewerUrl, { waitUntil: "domcontentloaded" });
-      await viewerPage.waitForSelector("[data-viewer-canvas]", { timeout: 5000 });
-      await waitForViewerConnected(viewerPage, "WebRTC paired viewer", 10000);
-      await waitForWebRTCProbeOpen(page);
-      await waitForWebRTCProbeOpen(viewerPage);
-
-      const beforePixels = await darkInkPixels(viewerPage);
-      await drawHorizontalBoardStroke(page, 0.46);
-      await waitForDarkInkPixelsAbove(viewerPage, beforePixels, 50, 10000);
-
-      const boardChannelsBeforeReconnect = await webRTCProbeTotal(page);
-      await forceWebRTCReconnect(viewerPage, "Viewer");
-      await waitForWebRTCProbeOpen(page, boardChannelsBeforeReconnect + 1);
-      await waitForViewerConnected(
-        viewerPage,
-        "WebRTC paired viewer after reconnect",
-        15000,
-      );
-      await waitForBoardStatusIncludes(
-        page,
-        sessionId,
-        "WebRTC Board session status after reconnect",
-        15000,
-      );
-
-      const reconnectBeforePixels = await darkInkPixels(viewerPage);
-      await drawHorizontalBoardStroke(page, 0.62);
-      await waitForDarkInkPixelsAbove(
-        viewerPage,
-        reconnectBeforePixels,
-        50,
-        10000,
-      );
-    });
-    await viewerPage.close();
-
-    const boardChannelsBeforeRejoin = await webRTCProbeTotal(page);
-    await waitForBoardStatusIncludes(
-      page,
-      "WebRTC reconnecting",
-      "WebRTC Board status after closing Viewer",
-      10000,
-    );
-
-    const rejoinedViewerPage = await page.context().newPage();
-    try {
-      await checkPageWithoutConsoleErrors(
-        rejoinedViewerPage,
-        "WebRTC rejoined viewer",
-        async () => {
-          await installWebRTCDataChannelProbe(rejoinedViewerPage);
-          await rejoinedViewerPage.setViewportSize({ width: 1000, height: 700 });
-          await rejoinedViewerPage.goto(webRTCViewerUrl, {
-            waitUntil: "domcontentloaded",
-          });
-          await rejoinedViewerPage.waitForSelector("[data-viewer-canvas]", {
-            timeout: 5000,
-          });
-          await waitForViewerConnected(
-            rejoinedViewerPage,
-            "WebRTC rejoined viewer",
-            15000,
-          );
-          await waitForWebRTCProbeOpen(page, boardChannelsBeforeRejoin + 1);
-          await waitForWebRTCProbeOpen(rejoinedViewerPage);
-          await waitForDarkInkPixelsAbove(rejoinedViewerPage, 0, 50, 15000);
-        },
-      );
-    } finally {
-      await rejoinedViewerPage.close();
-    }
-  } finally {
-    if (!viewerPage.isClosed()) {
-      await viewerPage.close();
-    }
-  }
-});
-
 await checkWithoutConsoleErrors("Viewer", async () => {
   await page.setViewportSize({ width: 800, height: 600 });
   await page.goto(viewerUrl, { waitUntil: "domcontentloaded" });
@@ -1713,7 +1429,6 @@ await checkWithoutConsoleErrors("Viewer", async () => {
     const rect = canvas?.getBoundingClientRect();
     const forbiddenSelectors = [
       "[data-board-control]",
-      "button",
       "select",
       "input",
       ".toolbar",
@@ -1731,6 +1446,8 @@ await checkWithoutConsoleErrors("Viewer", async () => {
       hasCanvas: Boolean(canvas),
       canvasWidth: rect?.width ?? 0,
       canvasHeight: rect?.height ?? 0,
+      fullscreenButtons: document.querySelectorAll("[data-viewer-fullscreen]")
+        .length,
       forbidden,
       status:
         document.querySelector("[data-viewer-status]")?.dataset
@@ -1757,10 +1474,13 @@ await checkWithoutConsoleErrors("Viewer", async () => {
         .join(", ")}.`,
     );
   }
+  if (result.fullscreenButtons !== 1) {
+    throw new Error(`Viewer has ${result.fullscreenButtons} fullscreen buttons.`);
+  }
   if (result.status !== "Connected") {
     throw new Error(`Viewer did not connect to the local relay. Status: ${result.status}`);
   }
-  if (result.visibleStatus !== "") {
+  if (result.visibleStatus !== "" && result.visibleStatus !== "Connected") {
     throw new Error(`Viewer shows non-board status text: ${result.visibleStatus}`);
   }
 });

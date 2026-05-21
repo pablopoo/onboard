@@ -7,11 +7,33 @@ async function loadViewerModule() {
 }
 
 function createFakeElement(properties = {}) {
+  const listeners = new Map();
+
   return {
     textContent: "",
     hidden: false,
     dataset: {},
+    style: {},
+    childrenList: [],
+    appendChild(child) {
+      this.childrenList.push(child);
+      child.parentNode = this;
+    },
+    remove() {
+      this.removed = true;
+    },
     ...properties,
+    addEventListener(type, listener) {
+      if (!listeners.has(type)) {
+        listeners.set(type, new Set());
+      }
+      listeners.get(type).add(listener);
+    },
+    dispatch(type) {
+      for (const listener of listeners.get(type) ?? []) {
+        listener({ type, preventDefault() {} });
+      }
+    },
     setAttribute(name, value) {
       this.attributes ??= new Map();
       this.attributes.set(name, String(value));
@@ -26,6 +48,30 @@ function createFakeDocument(root, selector = "#viewer-app") {
   return {
     querySelector(requestedSelector) {
       return requestedSelector === selector ? root : null;
+    },
+    createElement(tagName) {
+      return createFakeElement({ tagName });
+    },
+  };
+}
+
+function createFakeFullscreenDocument(properties = {}) {
+  const listeners = new Map();
+
+  return {
+    fullscreenElement: null,
+    visibilityState: "visible",
+    ...properties,
+    addEventListener(type, listener) {
+      if (!listeners.has(type)) {
+        listeners.set(type, new Set());
+      }
+      listeners.get(type).add(listener);
+    },
+    dispatch(type) {
+      for (const listener of listeners.get(type) ?? []) {
+        listener({ type, preventDefault() {} });
+      }
     },
   };
 }
@@ -119,61 +165,6 @@ function createFakeTransport(options = {}) {
     emitStatus(status) {
       for (const handler of statusHandlers) {
         handler(status);
-      }
-    },
-    close() {
-      this.closed = true;
-    },
-  };
-}
-
-function createFakeSignalingClient(options = {}) {
-  const handlers = new Set();
-  const connection = createDeferred();
-
-  return {
-    connected: false,
-    closed: false,
-    connectCalls: 0,
-    createdSessions: [],
-    joinedSessions: [],
-    sentSignals: [],
-    connect() {
-      this.connectCalls += 1;
-      if (options.deferConnect) {
-        return connection.promise.then(() => {
-          this.connected = true;
-        });
-      }
-
-      if (options.rejectConnect) {
-        return Promise.reject(new Error("signaling connect failed"));
-      }
-
-      this.connected = true;
-      return Promise.resolve();
-    },
-    resolveConnect() {
-      connection.resolve();
-    },
-    createSession(peerId) {
-      this.createdSessions.push(peerId);
-    },
-    joinSession(sessionId, peerId) {
-      this.joinedSessions.push({ sessionId, peerId });
-    },
-    sendSignal(message) {
-      this.sentSignals.push(message);
-    },
-    onMessage(handler) {
-      handlers.add(handler);
-      return () => {
-        handlers.delete(handler);
-      };
-    },
-    emit(message) {
-      for (const handler of handlers) {
-        handler(message);
       }
     },
     close() {
@@ -314,6 +305,8 @@ function createViewerAppRoot() {
   const children = new Map([
     ["[data-viewer-canvas]", createFakeCanvas()],
     ["[data-viewer-status]", createFakeElement()],
+    ["[data-viewer-fullscreen]", createFakeElement()],
+    ["[data-viewer-install-hint]", createFakeElement({ hidden: true })],
   ]);
 
   return createFakeElement({ children });
@@ -370,8 +363,8 @@ function latestRender(renders) {
 
 function assertViewerStatus(element, message) {
   assert.equal(element.dataset.viewerConnection, message);
-  assert.equal(element.hidden, message === "Connected");
-  assert.equal(element.textContent, message === "Connected" ? "" : message);
+  assert.equal(element.hidden, false);
+  assert.equal(element.textContent, message);
 }
 
 async function flushAsyncWork() {
@@ -397,37 +390,23 @@ test("createRelayURL maps http and https locations to /ws/relay", async () => {
   );
 });
 
-test("createSignalURL maps http and https locations to /signal", async () => {
-  const { createSignalURL } = await loadViewerModule();
-
-  assert.equal(
-    createSignalURL({ protocol: "http:", host: "local.test:8080" }),
-    "ws://local.test:8080/signal",
-  );
-  assert.equal(
-    createSignalURL({ protocol: "https:", host: "board.test" }),
-    "wss://board.test/signal",
-  );
-});
-
-test("viewer app defaults to relay transport", async () => {
+test("viewer app ignores stale transport query and uses relay", async () => {
   const { createViewerApp } = await loadViewerModule();
   const root = createViewerAppRoot();
   const relayTransport = createFakeTransport();
   const relayCalls = [];
-  const signalingCalls = [];
 
   const controller = createViewerApp({
     document: createFakeDocument(root),
-    location: { protocol: "http:", host: "local.test:8080", search: "" },
+    location: {
+      protocol: "http:",
+      host: "local.test:8080",
+      search: "?transport=webrtc&session=old",
+    },
     WebSocketImpl: class FakeWebSocket {},
     createRelayTransport(options) {
       relayCalls.push(options);
       return relayTransport;
-    },
-    createSignalingClientImpl(options) {
-      signalingCalls.push(options);
-      return createFakeSignalingClient();
     },
   });
   await flushAsyncWork();
@@ -435,8 +414,313 @@ test("viewer app defaults to relay transport", async () => {
   assert.equal(relayCalls.length, 1);
   assert.equal(relayCalls[0].url, "ws://local.test:8080/ws/relay?role=viewer");
   assert.equal(relayTransport.connectCalls, 1);
-  assert.deepEqual(signalingCalls, []);
   assertViewerStatus(root.querySelector("[data-viewer-status]"), "Connected");
+
+  controller.close();
+});
+
+test("viewer fullscreen button requests fullscreen on the viewer shell", async () => {
+  const { createViewerApp } = await loadViewerModule();
+  const root = createViewerAppRoot();
+  const button = root.querySelector("[data-viewer-fullscreen]");
+  const relayTransport = createFakeTransport();
+  let fullscreenCalls = 0;
+  const fullscreenDocument = createFakeFullscreenDocument();
+  root.requestFullscreen = () => {
+    fullscreenCalls += 1;
+    fullscreenDocument.fullscreenElement = root;
+    return Promise.resolve();
+  };
+
+  const controller = createViewerApp({
+    document: createFakeDocument(root),
+    fullscreenDocument,
+    location: { protocol: "http:", host: "local.test:8080", search: "" },
+    createRelayTransport() {
+      return relayTransport;
+    },
+  });
+  await flushAsyncWork();
+
+  assert.equal(button.hidden, false);
+
+  button.dispatch("click");
+  await flushAsyncWork();
+
+  assert.equal(fullscreenCalls, 1);
+
+  controller.close();
+});
+
+test("viewer fullscreen button falls back to the document element", async () => {
+  const { createViewerApp } = await loadViewerModule();
+  const root = createViewerAppRoot();
+  const button = root.querySelector("[data-viewer-fullscreen]");
+  const relayTransport = createFakeTransport();
+  const documentElement = createFakeElement();
+  let fullscreenCalls = 0;
+  documentElement.requestFullscreen = () => {
+    fullscreenCalls += 1;
+    return Promise.resolve();
+  };
+
+  const controller = createViewerApp({
+    document: createFakeDocument(root),
+    fullscreenDocument: createFakeFullscreenDocument({ documentElement }),
+    location: { protocol: "http:", host: "local.test:8080", search: "" },
+    createRelayTransport() {
+      return relayTransport;
+    },
+  });
+  await flushAsyncWork();
+
+  button.dispatch("click");
+  await flushAsyncWork();
+
+  assert.equal(fullscreenCalls, 1);
+
+  controller.close();
+});
+
+test("viewer fullscreen button exits fullscreen when already active", async () => {
+  const { createViewerApp } = await loadViewerModule();
+  const root = createViewerAppRoot();
+  const button = root.querySelector("[data-viewer-fullscreen]");
+  const relayTransport = createFakeTransport();
+  let exitCalls = 0;
+  root.requestFullscreen = () => Promise.resolve();
+
+  const controller = createViewerApp({
+    document: createFakeDocument(root),
+    fullscreenDocument: createFakeFullscreenDocument({
+      fullscreenElement: root,
+      exitFullscreen() {
+        exitCalls += 1;
+        return Promise.resolve();
+      },
+    }),
+    location: { protocol: "http:", host: "local.test:8080", search: "" },
+    createRelayTransport() {
+      return relayTransport;
+    },
+  });
+  await flushAsyncWork();
+
+  button.dispatch("click");
+  await flushAsyncWork();
+
+  assert.equal(exitCalls, 1);
+
+  controller.close();
+});
+
+test("viewer fullscreen button stays visible when fullscreen is unsupported", async () => {
+  const { createViewerApp } = await loadViewerModule();
+  const root = createViewerAppRoot();
+  const button = root.querySelector("[data-viewer-fullscreen]");
+  const installHint = root.querySelector("[data-viewer-install-hint]");
+  const relayTransport = createFakeTransport();
+
+  const controller = createViewerApp({
+    document: createFakeDocument(root),
+    fullscreenDocument: {},
+    location: { protocol: "http:", host: "local.test:8080", search: "" },
+    createRelayTransport() {
+      return relayTransport;
+    },
+  });
+  await flushAsyncWork();
+
+  assert.equal(button.hidden, false);
+  assert.equal(button.dataset.viewerFullscreenUnsupported, "true");
+  assert.equal(
+    button.attributes.get("aria-label"),
+    "Show iPhone install instructions",
+  );
+
+  button.dispatch("click");
+
+  assert.equal(installHint.hidden, false);
+
+  controller.close();
+});
+
+test("viewer fullscreen button hides when launched as a standalone iOS web app", async () => {
+  const { createViewerApp } = await loadViewerModule();
+  const root = createViewerAppRoot();
+  const button = root.querySelector("[data-viewer-fullscreen]");
+  const relayTransport = createFakeTransport();
+  root.requestFullscreen = () => Promise.resolve();
+
+  const controller = createViewerApp({
+    document: createFakeDocument(root),
+    fullscreenDocument: createFakeFullscreenDocument(),
+    wakeLockNavigator: { standalone: true },
+    location: { protocol: "http:", host: "local.test:8080", search: "" },
+    createRelayTransport() {
+      return relayTransport;
+    },
+  });
+  await flushAsyncWork();
+
+  assert.equal(button.hidden, true);
+
+  controller.close();
+});
+
+test("viewer standalone app requests screen wake lock without fullscreen", async () => {
+  const { createViewerApp } = await loadViewerModule();
+  const root = createViewerAppRoot();
+  const button = root.querySelector("[data-viewer-fullscreen]");
+  const relayTransport = createFakeTransport();
+  const wakeLockRequests = [];
+  root.requestFullscreen = () => Promise.resolve();
+
+  const controller = createViewerApp({
+    document: createFakeDocument(root),
+    fullscreenDocument: createFakeFullscreenDocument(),
+    wakeLockNavigator: {
+      standalone: true,
+      wakeLock: {
+        request(type) {
+          wakeLockRequests.push(type);
+          return Promise.resolve(createFakeElement());
+        },
+      },
+    },
+    location: { protocol: "http:", host: "local.test:8080", search: "" },
+    createRelayTransport() {
+      return relayTransport;
+    },
+  });
+  await flushAsyncWork();
+
+  assert.equal(button.hidden, true);
+  assert.deepEqual(wakeLockRequests, ["screen"]);
+
+  controller.close();
+});
+
+test("viewer standalone app retries wake lock after a viewer tap", async () => {
+  const { createViewerApp } = await loadViewerModule();
+  const root = createViewerAppRoot();
+  const relayTransport = createFakeTransport();
+  let requestAttempts = 0;
+  root.requestFullscreen = () => Promise.resolve();
+
+  const controller = createViewerApp({
+    document: createFakeDocument(root),
+    fullscreenDocument: createFakeFullscreenDocument(),
+    wakeLockNavigator: {
+      standalone: true,
+      wakeLock: {
+        request() {
+          requestAttempts += 1;
+          if (requestAttempts === 1) {
+            return Promise.reject(new Error("user activation required"));
+          }
+          return Promise.resolve(createFakeElement());
+        },
+      },
+    },
+    location: { protocol: "http:", host: "local.test:8080", search: "" },
+    createRelayTransport() {
+      return relayTransport;
+    },
+  });
+  await flushAsyncWork();
+
+  root.dispatch("pointerdown");
+  await flushAsyncWork();
+
+  assert.equal(requestAttempts, 2);
+
+  controller.close();
+});
+
+test("viewer fullscreen button requests a wake lock while fullscreen is active", async () => {
+  const { createViewerApp } = await loadViewerModule();
+  const root = createViewerAppRoot();
+  const button = root.querySelector("[data-viewer-fullscreen]");
+  const relayTransport = createFakeTransport();
+  const fullscreenDocument = createFakeFullscreenDocument();
+  const wakeLockRequests = [];
+  root.requestFullscreen = () => {
+    fullscreenDocument.fullscreenElement = root;
+    return Promise.resolve();
+  };
+
+  const controller = createViewerApp({
+    document: createFakeDocument(root),
+    fullscreenDocument,
+    wakeLockNavigator: {
+      wakeLock: {
+        request(type) {
+          wakeLockRequests.push(type);
+          return Promise.resolve(createFakeElement());
+        },
+      },
+    },
+    location: { protocol: "http:", host: "local.test:8080", search: "" },
+    createRelayTransport() {
+      return relayTransport;
+    },
+  });
+  await flushAsyncWork();
+
+  button.dispatch("click");
+  await flushAsyncWork();
+
+  assert.deepEqual(wakeLockRequests, ["screen"]);
+
+  controller.close();
+});
+
+test("viewer fullscreen button releases wake lock when fullscreen exits", async () => {
+  const { createViewerApp } = await loadViewerModule();
+  const root = createViewerAppRoot();
+  const button = root.querySelector("[data-viewer-fullscreen]");
+  const relayTransport = createFakeTransport();
+  const fullscreenDocument = createFakeFullscreenDocument();
+  let releases = 0;
+  root.requestFullscreen = () => {
+    fullscreenDocument.fullscreenElement = root;
+    return Promise.resolve();
+  };
+  fullscreenDocument.exitFullscreen = () => {
+    fullscreenDocument.fullscreenElement = null;
+    return Promise.resolve();
+  };
+
+  const controller = createViewerApp({
+    document: createFakeDocument(root),
+    fullscreenDocument,
+    wakeLockNavigator: {
+      wakeLock: {
+        request() {
+          return Promise.resolve({
+            addEventListener() {},
+            release() {
+              releases += 1;
+              return Promise.resolve();
+            },
+          });
+        },
+      },
+    },
+    location: { protocol: "http:", host: "local.test:8080", search: "" },
+    createRelayTransport() {
+      return relayTransport;
+    },
+  });
+  await flushAsyncWork();
+
+  button.dispatch("click");
+  await flushAsyncWork();
+  button.dispatch("click");
+  await flushAsyncWork();
+
+  assert.equal(releases, 1);
 
   controller.close();
 });
@@ -459,256 +743,12 @@ test("viewer app honors explicit relay transport mode", async () => {
       relayCalls.push(options);
       return relayTransport;
     },
-    createSignalingClientImpl() {
-      throw new Error("signaling should not be used in relay mode");
-    },
   });
   await flushAsyncWork();
 
   assert.equal(relayCalls.length, 1);
   assert.equal(relayCalls[0].url, "wss://viewer.test/ws/relay?role=viewer");
   assert.equal(relayTransport.connectCalls, 1);
-
-  controller.close();
-});
-
-test("webrtc viewer joins session, sends setup ready signal, and connects data channel", async () => {
-  const { createViewerApp } = await loadViewerModule();
-  const root = createViewerAppRoot();
-  const signaling = createFakeSignalingClient();
-  const webRTCTransport = createFakeTransport();
-  const signalingCalls = [];
-  const webRTCCalls = [];
-  const setupOrder = [];
-  const errors = [];
-  class FakeRTCPeerConnection {}
-  const sendSignal = signaling.sendSignal.bind(signaling);
-  signaling.sendSignal = (message) => {
-    setupOrder.push("ready-signal");
-    sendSignal(message);
-  };
-
-  const controller = createViewerApp({
-    document: createFakeDocument(root),
-    location: {
-      protocol: "https:",
-      host: "viewer.test",
-      search: "?transport=webrtc&sessionId=session-42",
-    },
-    WebSocketImpl: class FakeWebSocket {},
-    RTCPeerConnectionImpl: FakeRTCPeerConnection,
-    createPeerId: () => "viewer-peer",
-    createRelayTransport() {
-      throw new Error("relay should not be used in webrtc mode");
-    },
-    createSignalingClientImpl(options) {
-      signalingCalls.push(options);
-      return signaling;
-    },
-    createWebRTCTransport(options) {
-      webRTCCalls.push(options);
-      return {
-        ...webRTCTransport,
-        connect() {
-          setupOrder.push("webrtc-connect");
-          return webRTCTransport.connect();
-        },
-      };
-    },
-    reportError(error) {
-      errors.push(error);
-    },
-  });
-  await flushAsyncWork();
-
-  assert.equal(signalingCalls.length, 1);
-  assert.equal(signalingCalls[0].url, "wss://viewer.test/signal");
-  assert.equal(signaling.connectCalls, 1);
-  assert.deepEqual(signaling.joinedSessions, [
-    { sessionId: "session-42", peerId: "viewer-peer" },
-  ]);
-  assert.deepEqual(signaling.sentSignals, []);
-  assert.deepEqual(webRTCCalls, []);
-
-  signaling.emit({
-    type: "session:joined",
-    sessionId: "session-42",
-    peerId: "viewer-peer",
-    role: "viewer",
-  });
-  await flushAsyncWork();
-
-  assert.deepEqual(signaling.sentSignals, [
-    {
-      type: "ice",
-      sessionId: "session-42",
-      peerId: "viewer-peer",
-      payload: { onboardViewerReady: true },
-    },
-  ]);
-  assert.deepEqual(setupOrder, ["webrtc-connect", "ready-signal"]);
-  assert.equal(webRTCCalls.length, 1);
-  assert.equal(webRTCCalls[0].signaling, signaling);
-  assert.equal(webRTCCalls[0].role, "viewer");
-  assert.equal(webRTCCalls[0].sessionId, "session-42");
-  assert.equal(webRTCCalls[0].peerId, "viewer-peer");
-  assert.equal(webRTCCalls[0].RTCPeerConnectionImpl, FakeRTCPeerConnection);
-  assert.equal(webRTCTransport.connectCalls, 1);
-  assertViewerStatus(root.querySelector("[data-viewer-status]"), "Connected");
-  assert.deepEqual(errors, []);
-
-  webRTCTransport.emitStatus("disconnected");
-  await flushAsyncWork();
-
-  assertViewerStatus(root.querySelector("[data-viewer-status]"), "Connected");
-
-  controller.close();
-});
-
-test("webrtc viewer reconnects data channel after established disconnect", async () => {
-  const { createViewerApp } = await loadViewerModule();
-  const root = createViewerAppRoot();
-  const signaling = createFakeSignalingClient();
-  const webRTCTransports = [createFakeTransport(), createFakeTransport()];
-  const webRTCCalls = [];
-
-  const controller = createViewerApp({
-    document: createFakeDocument(root),
-    location: {
-      protocol: "https:",
-      host: "viewer.test",
-      search: "?transport=webrtc&sessionId=session-42",
-    },
-    WebSocketImpl: class FakeWebSocket {},
-    RTCPeerConnectionImpl: class FakeRTCPeerConnection {},
-    createPeerId: () => "viewer-peer",
-    createRelayTransport() {
-      throw new Error("relay should not be used in webrtc mode");
-    },
-    createSignalingClientImpl() {
-      return signaling;
-    },
-    createWebRTCTransport(options) {
-      webRTCCalls.push(options);
-      return webRTCTransports[webRTCCalls.length - 1];
-    },
-  });
-  await flushAsyncWork();
-
-  signaling.emit({
-    type: "session:joined",
-    sessionId: "session-42",
-    peerId: "viewer-peer",
-    role: "viewer",
-  });
-  await flushAsyncWork();
-
-  assert.equal(webRTCCalls.length, 1);
-  assert.equal(webRTCTransports[0].connectCalls, 1);
-  assert.equal(signaling.sentSignals.length, 1);
-
-  webRTCTransports[0].emitStatus("disconnected");
-  await flushAsyncWork();
-
-  assertViewerStatus(root.querySelector("[data-viewer-status]"), "Connected");
-  assert.equal(webRTCCalls.length, 2);
-  assert.equal(webRTCCalls[1].sessionId, "session-42");
-  assert.equal(webRTCTransports[1].connectCalls, 1);
-  assert.deepEqual(signaling.sentSignals[1], {
-    type: "ice",
-    sessionId: "session-42",
-    peerId: "viewer-peer",
-    payload: { onboardViewerReady: true },
-  });
-
-  controller.close();
-});
-
-test("webrtc viewer reports data channel reconnect failures", async () => {
-  const { createViewerApp } = await loadViewerModule();
-  const root = createViewerAppRoot();
-  const signaling = createFakeSignalingClient();
-  const webRTCTransports = [
-    createFakeTransport(),
-    createFakeTransport({ rejectConnect: true }),
-  ];
-  const errors = [];
-  let transportIndex = 0;
-
-  const controller = createViewerApp({
-    document: createFakeDocument(root),
-    location: {
-      protocol: "https:",
-      host: "viewer.test",
-      search: "?transport=webrtc&sessionId=session-42",
-    },
-    WebSocketImpl: class FakeWebSocket {},
-    RTCPeerConnectionImpl: class FakeRTCPeerConnection {},
-    createPeerId: () => "viewer-peer",
-    createRelayTransport() {
-      throw new Error("relay should not be used in webrtc mode");
-    },
-    createSignalingClientImpl() {
-      return signaling;
-    },
-    createWebRTCTransport() {
-      const transport = webRTCTransports[transportIndex];
-      transportIndex += 1;
-      return transport;
-    },
-    reportError(error) {
-      errors.push(error);
-    },
-  });
-  await flushAsyncWork();
-
-  signaling.emit({
-    type: "session:joined",
-    sessionId: "session-42",
-    peerId: "viewer-peer",
-    role: "viewer",
-  });
-  await flushAsyncWork();
-
-  webRTCTransports[0].emitStatus("disconnected");
-  await flushAsyncWork();
-
-  assertViewerStatus(root.querySelector("[data-viewer-status]"), "Disconnected");
-  assert.equal(errors.length, 1);
-  assert.match(errors[0].message, /connect failed/i);
-
-  controller.close();
-});
-
-test("webrtc viewer fails clearly without a sessionId URL parameter", async () => {
-  const { createViewerApp } = await loadViewerModule();
-  const root = createViewerAppRoot();
-  const errors = [];
-  const signalingCalls = [];
-
-  const controller = createViewerApp({
-    document: createFakeDocument(root),
-    location: {
-      protocol: "https:",
-      host: "viewer.test",
-      search: "?transport=webrtc",
-    },
-    createSignalingClientImpl(options) {
-      signalingCalls.push(options);
-      return createFakeSignalingClient();
-    },
-    reportError(error) {
-      errors.push(error);
-    },
-  });
-  await flushAsyncWork();
-
-  assertViewerStatus(
-    root.querySelector("[data-viewer-status]"),
-    "Connection failed",
-  );
-  assert.equal(signalingCalls.length, 0);
-  assert.match(errors[0].message, /sessionId/i);
 
   controller.close();
 });
@@ -972,6 +1012,42 @@ test("viewer status follows transport reconnect lifecycle", async () => {
   assertViewerStatus(elements.status, "Connected");
 });
 
+test("viewer connected status hides after a short delay", async () => {
+  const timers = createFakeTimers();
+  const { controller, elements } = await createFixture({
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  });
+
+  await controller.connect();
+
+  assertViewerStatus(elements.status, "Connected");
+  assert.equal(timers.scheduled.length, 1);
+  assert.equal(timers.scheduled[0].delay, 12_000);
+
+  timers.runNext();
+
+  assert.equal(elements.status.dataset.viewerConnection, "Connected");
+  assert.equal(elements.status.textContent, "Connected");
+  assert.equal(elements.status.hidden, true);
+});
+
+test("viewer disconnected status clears pending connected auto-hide", async () => {
+  const timers = createFakeTimers();
+  const { controller, elements, transport } = await createFixture({
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  });
+
+  await controller.connect();
+  assert.equal(timers.scheduled.length, 1);
+
+  transport.emitStatus("disconnected");
+
+  assertViewerStatus(elements.status, "Disconnected");
+  assert.equal(timers.scheduled.length, 0);
+});
+
 test("connect after close rejects without reconnecting an unsubscribed controller", async () => {
   const { controller, transport, elements } = await createFixture();
 
@@ -990,7 +1066,9 @@ test("viewer HTML has no board controls or toolbar controls", async () => {
 
   assert.equal(html.includes("data-board-control"), false);
   assert.equal(html.includes("class=\"toolbar\""), false);
-  assert.equal(/<button\b/i.test(html), false);
+  assert.match(html, /data-viewer-fullscreen/);
+  assert.match(html, /rel="manifest" href="\/viewer\.webmanifest"/);
+  assert.match(html, /apple-mobile-web-app-capable/);
   assert.equal(/<select\b/i.test(html), false);
   assert.equal(/<input\b/i.test(html), false);
 });

@@ -11,22 +11,19 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/coder/websocket"
 
 	"onboard/internal/hub"
-	"onboard/internal/signaling"
 	"onboard/web"
 )
 
 const (
-	relayWriteTimeout    = 5 * time.Second
-	relayReadLimitBytes  = 4 << 20
-	signalReadLimitBytes = 1 << 20
-	maxRelayStrokeWidth  = 128
-	conflictCloseDelay   = 50 * time.Millisecond
+	relayWriteTimeout   = 5 * time.Second
+	relayReadLimitBytes = 4 << 20
+	maxRelayStrokeWidth = 128
+	conflictCloseDelay  = 50 * time.Millisecond
 )
 
 var relaySurfaces = map[string]struct{}{
@@ -47,11 +44,10 @@ var relayChalkSurfaces = map[string]struct{}{
 }
 
 type Config struct {
-	Mode           string
-	Addr           string
-	BaseURLs       []string
-	RelayHub       *hub.Hub
-	SignalRegistry *signaling.Registry
+	Mode     string
+	Addr     string
+	BaseURLs []string
+	RelayHub *hub.Hub
 }
 
 func New(config Config) http.Handler {
@@ -61,11 +57,6 @@ func New(config Config) http.Handler {
 	if relay == nil {
 		relay = hub.New()
 	}
-	signalRegistry := config.SignalRegistry
-	if signalRegistry == nil {
-		signalRegistry = signaling.NewRegistry()
-	}
-	signalPeers := newSignalPeerIndex()
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
@@ -86,7 +77,6 @@ func New(config Config) http.Handler {
 	})
 	mux.HandleFunc("/api/share", shareEndpoint(config.BaseURLs))
 	mux.HandleFunc("/ws/relay", relayEndpoint(relay))
-	mux.HandleFunc("/signal", signalEndpoint(signalRegistry, signalPeers))
 
 	return mux
 }
@@ -217,205 +207,6 @@ func relayRole(r *http.Request) string {
 	return hub.RoleViewer
 }
 
-func signalEndpoint(registry *signaling.Registry, peers *signalPeerIndex) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		conn, err := websocket.Accept(w, r, nil)
-		if err != nil {
-			return
-		}
-		conn.SetReadLimit(signalReadLimitBytes)
-		defer conn.CloseNow()
-
-		var writeMu sync.Mutex
-		var unsubscribe func()
-		var forwardDone <-chan struct{}
-		var activeSessionID string
-		var activePeerID string
-
-		stopForwarding := func() {
-			if unsubscribe != nil {
-				unsubscribe()
-				unsubscribe = nil
-			}
-			if forwardDone != nil {
-				<-forwardDone
-				forwardDone = nil
-			}
-		}
-		releaseActivePeer := func() {
-			if activeSessionID == "" || activePeerID == "" {
-				return
-			}
-			if err := registry.ReleasePeer(activeSessionID, activePeerID); err == nil {
-				peers.ReleasePeer(activeSessionID, activePeerID)
-			}
-			activeSessionID = ""
-			activePeerID = ""
-		}
-		defer func() {
-			stopForwarding()
-			releaseActivePeer()
-		}()
-
-		startForwarding := func(sessionID string, peerID string) error {
-			stopForwarding()
-			releaseActivePeer()
-
-			signals, unsubscribeNext, err := registry.Subscribe(sessionID, peerID)
-			if err != nil {
-				return err
-			}
-
-			done := make(chan struct{})
-			unsubscribe = unsubscribeNext
-			forwardDone = done
-			activeSessionID = sessionID
-			activePeerID = peerID
-			go func() {
-				defer close(done)
-				for signal := range signals {
-					fromPeerID := signal.FromPeerID
-					if fromPeerID == "" {
-						pairedPeerID, ok := peers.PairedPeerID(sessionID, peerID)
-						if !ok {
-							continue
-						}
-						fromPeerID = pairedPeerID
-					}
-					message := signalMessage{
-						Type:      signalMessageType(signal.Type),
-						SessionID: sessionID,
-						PeerID:    fromPeerID,
-						Payload:   signal.Payload,
-					}
-					if err := writeSignalMessage(conn, &writeMu, message); err != nil {
-						_ = conn.CloseNow()
-						return
-					}
-				}
-			}()
-			return nil
-		}
-
-		for {
-			messageType, data, err := conn.Read(context.Background())
-			if err != nil {
-				break
-			}
-			if messageType != websocket.MessageText {
-				continue
-			}
-
-			message, ok := parseSignalMessage(data)
-			if !ok {
-				if err := writeSignalError(conn, &writeMu, "malformed message"); err != nil {
-					return
-				}
-				continue
-			}
-
-			switch message.Type {
-			case "session:create":
-				peerID, ok := requiredSignalString(message.PeerID)
-				if !ok {
-					if err := writeSignalError(conn, &writeMu, "missing required field"); err != nil {
-						return
-					}
-					continue
-				}
-
-				session := registry.CreateSession(peerID)
-				peers.Record(session)
-				if err := startForwarding(session.ID, peerID); err != nil {
-					if writeErr := writeSignalError(conn, &writeMu, signalErrorText(err)); writeErr != nil {
-						return
-					}
-					continue
-				}
-				if err := writeSignalMessage(conn, &writeMu, signalMessage{
-					Type:      "session:created",
-					SessionID: session.ID,
-					PeerID:    session.Board.ID,
-					Role:      string(session.Board.Role),
-				}); err != nil {
-					return
-				}
-
-			case "session:join":
-				sessionID, sessionOK := requiredSignalString(message.SessionID)
-				peerID, peerOK := requiredSignalString(message.PeerID)
-				if !sessionOK || !peerOK {
-					if err := writeSignalError(conn, &writeMu, "missing required field"); err != nil {
-						return
-					}
-					continue
-				}
-
-				session, err := registry.JoinSession(sessionID, peerID)
-				if err != nil {
-					if writeErr := writeSignalError(conn, &writeMu, signalErrorText(err)); writeErr != nil {
-						return
-					}
-					continue
-				}
-				peers.Record(session)
-				if err := startForwarding(session.ID, peerID); err != nil {
-					if writeErr := writeSignalError(conn, &writeMu, signalErrorText(err)); writeErr != nil {
-						return
-					}
-					continue
-				}
-				if err := writeSignalMessage(conn, &writeMu, signalMessage{
-					Type:      "session:joined",
-					SessionID: session.ID,
-					PeerID:    session.Viewer.ID,
-					Role:      string(session.Viewer.Role),
-				}); err != nil {
-					return
-				}
-
-			case "signal:offer", "signal:answer", "signal:ice":
-				sessionID, sessionOK := requiredSignalString(message.SessionID)
-				peerID, peerOK := requiredSignalString(message.PeerID)
-				signalType, typeOK := signalTypeForMessage(message.Type)
-				if !sessionOK || !peerOK || !typeOK || message.Payload == nil {
-					if err := writeSignalError(conn, &writeMu, "missing required field"); err != nil {
-						return
-					}
-					continue
-				}
-
-				err := registry.SendSignal(sessionID, peerID, signaling.Signal{
-					Type:    signalType,
-					Payload: message.Payload,
-				})
-				if err != nil {
-					if writeErr := writeSignalError(conn, &writeMu, signalErrorText(err)); writeErr != nil {
-						return
-					}
-					continue
-				}
-
-			default:
-				if err := writeSignalError(conn, &writeMu, "unknown message type"); err != nil {
-					return
-				}
-			}
-		}
-
-		stopForwarding()
-		releaseActivePeer()
-		_ = conn.Close(websocket.StatusNormalClosure, "")
-	}
-}
-
-func signalMessageType(signalType signaling.SignalType) string {
-	if signalType == signaling.SignalPeerLeft {
-		return "session:peer-left"
-	}
-	return "signal:" + string(signalType)
-}
-
 func writeRelayEvent(conn *websocket.Conn, event hub.Event) error {
 	data, err := json.Marshal(event)
 	if err != nil {
@@ -434,27 +225,6 @@ func writeRelaySystemEvent(conn *websocket.Conn, event relaySystemEvent) error {
 	ctx, cancel := context.WithTimeout(context.Background(), relayWriteTimeout)
 	defer cancel()
 	return conn.Write(ctx, websocket.MessageText, data)
-}
-
-func writeSignalMessage(conn *websocket.Conn, writeMu *sync.Mutex, message signalMessage) error {
-	data, err := json.Marshal(message)
-	if err != nil {
-		return err
-	}
-
-	writeMu.Lock()
-	defer writeMu.Unlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), relayWriteTimeout)
-	defer cancel()
-	return conn.Write(ctx, websocket.MessageText, data)
-}
-
-func writeSignalError(conn *websocket.Conn, writeMu *sync.Mutex, message string) error {
-	return writeSignalMessage(conn, writeMu, signalMessage{
-		Type:  "error",
-		Error: message,
-	})
 }
 
 func parseRelayEvent(data []byte) (hub.Event, bool) {
@@ -710,23 +480,6 @@ func isRelayUnitNumber(value float64) bool {
 	return value >= 0 && value <= 1
 }
 
-func parseSignalMessage(data []byte) (signalMessage, bool) {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
-
-	var message signalMessage
-	if err := decoder.Decode(&message); err != nil {
-		return signalMessage{}, false
-	}
-	if err := decoder.Decode(&struct{}{}); err != nil {
-		if errors.Is(err, io.EOF) {
-			return message, true
-		}
-		return signalMessage{}, false
-	}
-	return signalMessage{}, false
-}
-
 func decodeRelayFields(data []byte) (map[string]json.RawMessage, bool) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
@@ -782,53 +535,6 @@ func decodeRequiredPayload(raw json.RawMessage) (map[string]any, bool) {
 		return nil, false
 	}
 	return payload, true
-}
-
-func requiredSignalString(value string) (string, bool) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "", false
-	}
-	return value, true
-}
-
-func signalTypeForMessage(messageType string) (signaling.SignalType, bool) {
-	switch messageType {
-	case "signal:offer":
-		return signaling.SignalOffer, true
-	case "signal:answer":
-		return signaling.SignalAnswer, true
-	case "signal:ice":
-		return signaling.SignalICE, true
-	default:
-		return "", false
-	}
-}
-
-func signalErrorText(err error) string {
-	switch {
-	case errors.Is(err, signaling.ErrUnknownSession):
-		return "unknown session"
-	case errors.Is(err, signaling.ErrUnknownPeer):
-		return "unknown peer"
-	case errors.Is(err, signaling.ErrPeerAlreadyJoined):
-		return "peer already joined"
-	case errors.Is(err, signaling.ErrPeerNotJoined):
-		return "peer not joined"
-	case errors.Is(err, signaling.ErrUnknownSignalType):
-		return "unknown signal type"
-	default:
-		return "signaling error"
-	}
-}
-
-type signalMessage struct {
-	Type      string         `json:"type"`
-	SessionID string         `json:"sessionId,omitempty"`
-	PeerID    string         `json:"peerId,omitempty"`
-	Role      string         `json:"role,omitempty"`
-	Payload   map[string]any `json:"payload,omitempty"`
-	Error     string         `json:"error,omitempty"`
 }
 
 type relaySystemEvent struct {
@@ -888,65 +594,4 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
-}
-
-type signalPeerIndex struct {
-	mu       sync.RWMutex
-	sessions map[string]signalSessionPeers
-}
-
-type signalSessionPeers struct {
-	BoardID  string
-	ViewerID string
-}
-
-func newSignalPeerIndex() *signalPeerIndex {
-	return &signalPeerIndex{
-		sessions: make(map[string]signalSessionPeers),
-	}
-}
-
-func (p *signalPeerIndex) Record(session signaling.Session) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	p.sessions[session.ID] = signalSessionPeers{
-		BoardID:  session.Board.ID,
-		ViewerID: session.Viewer.ID,
-	}
-}
-
-func (p *signalPeerIndex) ReleasePeer(sessionID string, peerID string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	session, ok := p.sessions[sessionID]
-	if !ok {
-		return
-	}
-	switch peerID {
-	case session.BoardID:
-		delete(p.sessions, sessionID)
-	case session.ViewerID:
-		session.ViewerID = ""
-		p.sessions[sessionID] = session
-	}
-}
-
-func (p *signalPeerIndex) PairedPeerID(sessionID string, peerID string) (string, bool) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	session, ok := p.sessions[sessionID]
-	if !ok {
-		return "", false
-	}
-	switch peerID {
-	case session.BoardID:
-		return session.ViewerID, session.ViewerID != ""
-	case session.ViewerID:
-		return session.BoardID, session.BoardID != ""
-	default:
-		return "", false
-	}
 }

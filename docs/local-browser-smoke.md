@@ -41,11 +41,6 @@ The check verifies:
 - Fade mode shows temporary ink in the connected viewer and removes it after expiration.
 - A viewer opened after the board already has writing renders the current board state from the relay snapshot.
 - The Board toolbar reports relay viewer presence after a Viewer is connected.
-- WebRTC Board creates a session, a session-linked WebRTC Viewer connects, and drawing reaches the Viewer over the data channel.
-- Forcibly closing the WebRTC data channel reconnects Board and Viewer in the
-  same session, and drawing after reconnect still reaches the Viewer.
-- Closing and reopening the WebRTC Viewer with the same session URL receives
-  the current board state from the Board snapshot sync.
 - `/viewer` loads without browser console or page errors.
 - `/viewer` has a visible canvas and no board controls, buttons, selects, inputs, or toolbar markup.
 - `/viewer` reports `Connected` through hidden status metadata within the timeout.
@@ -79,6 +74,4 @@ Manual fallback, if browser automation is unavailable:
 14. Select Pointer on the Board, press on the canvas, confirm the Viewer shows the pointer, then release and confirm it hides.
 15. Enable Fade on the Board, draw one stroke, confirm the Viewer shows it, then confirm the stroke disappears after expiration.
 16. Close the Viewer tab, draw or keep existing writing on the Board, reopen the Viewer URL, and confirm the writing is visible without touching the Board again.
-17. Open `/board?transport=webrtc`, copy the session-linked Viewer URL shown in the Board status, open that Viewer URL, draw on the Board, and confirm the Viewer receives the stroke.
-18. To manually mimic the WebRTC reconnect check, temporarily interrupt one peer connection, wait for the Viewer to report connected again, then draw and confirm the Viewer updates.
-19. Open the printed Viewer URL and confirm it shows only viewer output markup, with no buttons, selects, inputs, toolbar, or persistent status overlay after connecting, and has no DevTools console errors.
+17. Open the printed Viewer URL and confirm it shows only viewer output markup, with no buttons, selects, inputs, toolbar, or persistent status overlay after connecting, and has no DevTools console errors.

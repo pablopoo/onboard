@@ -2,14 +2,43 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="author" content="Pablo">
+    <meta name="theme-color" content="#172033">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="Onboard Viewer">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>Onboard Viewer</title>
-    <link rel="icon" href="data:,">
+    <link rel="icon" href="/icons/onboard.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/icons/onboard-180.png">
+    <link rel="manifest" href="/viewer.webmanifest">
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body class="drawing-page">
     <main id="viewer-app" class="viewer-shell">
       <canvas id="viewer-canvas" class="board-canvas" data-viewer-canvas></canvas>
+      <button
+        type="button"
+        class="viewer-fullscreen-button"
+        data-viewer-fullscreen
+        aria-label="Enter fullscreen"
+        title="Fullscreen"
+      >
+        <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M8 3H3v5"></path>
+          <path d="M3 3l6 6"></path>
+          <path d="M16 3h5v5"></path>
+          <path d="M21 3l-6 6"></path>
+          <path d="M8 21H3v-5"></path>
+          <path d="M3 21l6-6"></path>
+          <path d="M16 21h5v-5"></path>
+          <path d="M21 21l-6-6"></path>
+        </svg>
+      </button>
+      <p class="viewer-install-hint" data-viewer-install-hint hidden>
+        iPhone Safari: Share -> Add to Home Screen, then open Viewer from the Home Screen.
+      </p>
       <p id="viewer-status" class="viewer-status" data-viewer-status aria-live="polite">Connecting</p>
     </main>
     <script type="module" src="/viewer/viewer.js"></script>

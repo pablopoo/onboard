@@ -40,7 +40,7 @@ Default technical direction until proven otherwise:
 - WebSocket-based sync between board and viewer.
 - Canvas-based rendering first, unless a later phase proves SVG or a library is better.
 
-Follow the project tree documented in `docs/architecture.md`. Keep shared browser product logic in `web/core`, runtime adapters in `web/transports`, Go local relay code in `internal/hub`, and hosted WebRTC signaling code in `internal/signaling`.
+Follow the project tree documented in `docs/architecture.md`. Keep shared browser product logic in `web/core`, the WebSocket runtime adapter in `web/transports`, and Go local relay code in `internal/hub`.
 
 ## Working Rules For Codex
 
@@ -59,7 +59,7 @@ Follow the project tree documented in `docs/architecture.md`. Keep shared browse
 Reliability hardening for a real-use local board tool:
 
 - Keep the Board and Viewer happy path simple: start app, open Board, open Viewer, draw.
-- Preserve the shared browser core across relay and WebRTC transports.
+- Preserve the shared browser core and keep sync through the local WebSocket relay.
 - Tighten reconnect, failure, resize, mobile, and viewer-only behavior with focused tests.
 - Keep visual/UI polish scoped to making the Board feel usable on desktop, tablet, and phone.
 - Verify changes with unit tests and the local browser smoke script before claiming completion.

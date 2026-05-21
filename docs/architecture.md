@@ -1,15 +1,13 @@
 # Architecture Notes
 
-Onboard uses one shared browser core with two runtime approaches.
+Onboard has one supported release path: a small Go local-network web app.
 
-The shared browser core is product logic. It owns the event protocol, board
-state, canvas rendering rules, surface/tool compatibility, pointer state, and
-ephemeral stroke behavior. Runtime transports only move events between Board and
-Viewer.
+The Go binary serves the browser app, owns the local WebSocket relay, and keeps
+board state in memory. The browser app owns product behavior: event protocol,
+board state, canvas rendering rules, surface/tool compatibility, pointer state,
+and ephemeral stroke behavior.
 
-## Selected Approaches
-
-Approach 1 is the end-user local binary.
+## Runtime Shape
 
 ```text
 Board browser
@@ -21,36 +19,13 @@ Go local binary
   serves embedded web files
   owns /ws/relay
   keeps in-memory event state
-  broadcasts events to connected browsers
+  broadcasts events to connected viewers
 
 Viewer browser
   /viewer
   canvas only
   receives board events over WebSocket
 ```
-
-Approach 3 is the no-install hosted pairing path.
-
-```text
-Board browser
-  /board?transport=webrtc
-  creates or joins a paired session
-  sends board events over WebRTC DataChannel
-
-Go hosted signaling server
-  serves the same web app
-  owns /signal
-  exchanges session, offer, answer, and ICE messages
-  does not carry drawing events after DataChannel setup succeeds
-
-Viewer browser
-  /viewer?transport=webrtc
-  canvas only
-  receives board events over WebRTC DataChannel
-```
-
-Both approaches use the same `web/core` product logic. The difference is only
-the transport adapter under `web/transports`.
 
 ## Project Tree
 
@@ -67,9 +42,6 @@ onboard/
     hub/
       hub.go
       hub_test.go
-    signaling/
-      signaling.go
-      signaling_test.go
 
   web/
     assets.go
@@ -77,6 +49,10 @@ onboard/
     board.html
     viewer.html
     styles.css
+    manifest.webmanifest
+    board.webmanifest
+    viewer.webmanifest
+    icons/
 
     core/
       protocol.js
@@ -107,10 +83,6 @@ onboard/
       transport-contract.test.mjs
       websocket-relay-transport.js
       websocket-relay-transport.test.mjs
-      signaling-client.js
-      signaling-client.test.mjs
-      webrtc-datachannel-transport.js
-      webrtc-datachannel-transport.test.mjs
 
   scripts/
     install-go-latest.sh
@@ -123,11 +95,10 @@ onboard/
 
   docs/
     architecture.md
+    go-single-binary.md
+    release.md
     roadmap.md
     project-objective.md
-    approaches/
-    superpowers/
-      plans/
 
   package.json
   go.mod
@@ -138,29 +109,27 @@ onboard/
 
 Directory responsibilities:
 
-- `cmd/onboard`: executable entrypoint.
-- `internal/server`: HTTP routes, static serving, WebSocket relay endpoint, and
-  signaling endpoint.
-- `internal/hub`: Approach 1 local relay state and broadcast.
-- `internal/signaling`: Approach 3 session pairing and WebRTC signaling.
+- `cmd/onboard`: executable entrypoint and startup URL printing.
+- `internal/server`: HTTP routes, static serving, share metadata, and the
+  WebSocket relay endpoint.
+- `internal/hub`: local relay state, board snapshots, presenter lock, viewer
+  presence, and broadcast.
 - `web/core`: shared browser-side product logic.
 - `web/home`: home-page share-link, copy, and QR behavior.
-- `web/transports`: event movement adapters.
+- `web/transports`: event movement adapter for the WebSocket relay.
 - `web/board`: Board presenter controller.
 - `web/viewer`: Viewer content-only controller.
 - `web/assets.go`: embeds the static web app into the Go binary.
 - `scripts`: local development and release tooling.
-- `tests`: shell, release, and smoke checks.
+- `tests`: shell, release, and browser smoke checks.
 
 ## Routes
 
-- `/`: home page with relay and WebRTC links.
+- `/`: home page with Board and Viewer links.
 - `/board`: presenter surface using the local WebSocket relay.
 - `/viewer`: content-only viewer using the local WebSocket relay.
-- `/board?transport=webrtc`: presenter surface using WebRTC DataChannel.
-- `/viewer?transport=webrtc`: content-only viewer using WebRTC DataChannel.
-- `/ws/relay`: Approach 1 WebSocket event relay.
-- `/signal`: Approach 3 WebSocket signaling endpoint.
+- `/ws/relay`: WebSocket event relay.
+- `/api/share`: JSON share metadata for local/LAN URLs.
 - `/health`: readiness endpoint.
 
 ## Event Model
@@ -172,7 +141,7 @@ Why:
 - Smaller payloads.
 - Easy replay for new viewers.
 - Inspectable state transitions.
-- Same event stream can move over WebSocket or WebRTC DataChannel.
+- Same product model works on Board and Viewer.
 
 Core event types:
 
@@ -181,7 +150,9 @@ Core event types:
 - `stroke:point`
 - `stroke:end`
 - `stroke:expire`
+- `board:undo`
 - `board:clear`
+- `board:restore`
 - `pointer:show`
 - `pointer:move`
 - `pointer:hide`
@@ -197,8 +168,8 @@ blackboard -> chalk tools
 greenboard -> chalk tools
 ```
 
-Presenter tools include board surface, compatible pen type, eraser, clear all,
-pointer, and ephemeral write.
+Presenter tools include board surface, compatible pen type, eraser, undo, clear
+all, pointer, and ephemeral write.
 
 Stroke payloads carry rendering style so existing strokes remain visually stable
 after the presenter changes tools:
@@ -215,23 +186,6 @@ The eraser is modeled as a drawing tool in the event stream, not as a viewer
 control. Clear all is modeled as `board:clear`. The pointer is separate from
 drawing and must not create strokes.
 
-## Presenter Controls
-
-The Board uses a floating left toolbar on desktop and tablet-sized viewports.
-The active tool highlight is neutral charcoal, never the active surface color,
-so green/blue/black/white remain board-surface signals only.
-
-On phone-sized viewports, the Board starts with a compact bottom dock. The dock
-shows the active drawing mode, current surface color, current ink color when
-drawing, fade state, and quick undo. Expanding it opens the full presenter
-toolbar as a bottom sheet with an explicit minimize control. Compact tool
-choices and drawing input collapse the toolbar again so the writing surface
-stays clear.
-
-Mobile controls should keep touch targets at roughly 44 CSS pixels or larger.
-Detailed settings like tip size, eraser size, share link, and destructive clear
-belong in the expanded toolbar rather than the compact dock.
-
 ## Viewer Contract
 
 The Viewer is content-only. It shows:
@@ -241,20 +195,17 @@ The Viewer is content-only. It shows:
 - Eraser effects.
 - Explicit pointer only when the presenter uses pointer mode.
 - Unexpired ephemeral strokes.
+- Minimal connection/fullscreen feedback.
 
 The Viewer never shows presenter controls.
 
 ## State
 
-Approach 1 keeps state in memory in the local Go process.
+Board state lives in memory in the local Go process.
 
 - Restarting the server clears the board.
-- A newly connected relay viewer receives current in-memory events.
-- Persistence is deferred until there is a real need.
-
-Approach 3 uses the same browser state model after pairing. The signaling server
-exists to pair browsers and exchange WebRTC setup messages; the DataChannel
-carries drawing events.
+- A newly connected viewer receives the current in-memory board snapshot.
+- Persistence is deferred until repeated real use proves it is needed.
 
 ## Release Builds
 
@@ -263,21 +214,22 @@ Release binaries are cross-compiled with `CGO_ENABLED=0` using
 
 ```text
 dist/onboard-linux-amd64
+dist/onboard-linux-arm64
 dist/onboard-windows-amd64.exe
+dist/onboard-windows-arm64.exe
 dist/onboard-macos-amd64
 dist/onboard-macos-arm64
+dist/checksums.txt
 ```
 
 The build script is `scripts/build-release.sh`; its shell check is
-`tests/build-release-test.sh`.
+`tests/build-release-test.sh`. The release checklist is `docs/release.md`.
 
 ## Risks To Watch
 
 - Touch drawing can accidentally scroll the page.
 - Canvas sizes must match cleanly between board and viewer.
 - Different device pixel ratios can make strokes blurry or offset.
-- Reconnect behavior must remain simple and visible when a browser, socket, or
-  data channel drops.
-- WebRTC signaling errors must fail fast instead of leaving pairing or reconnect
-  flows waiting forever.
+- Reconnect behavior must remain simple and visible when a browser or socket
+  drops.
 - Viewer must never show board controls.

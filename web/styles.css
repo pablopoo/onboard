@@ -237,8 +237,8 @@ body {
   flex-direction: column;
   align-items: stretch;
   gap: 0.625rem;
-  width: 6.5rem;
-  padding: 0.625rem;
+  width: 7.25rem;
+  padding: 0.575rem;
   border: 1px solid rgb(203 213 225 / 0.9);
   border-radius: 1.25rem;
   --surface-color: #f8fafc;
@@ -249,10 +249,31 @@ body {
     0 14px 34px rgb(15 23 42 / 0.09);
   overflow-y: auto;
   overscroll-behavior: contain;
+  transition:
+    opacity 160ms ease,
+    transform 160ms ease;
 }
 
 .mobile-toolbar-dock {
   display: none;
+}
+
+.board-shell.is-toolbar-collapsed .toolbar {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(calc(-100% - 2rem));
+}
+
+.board-shell.is-toolbar-collapsed .mobile-toolbar-dock {
+  position: absolute;
+  top: 1rem;
+  left: 1rem;
+  z-index: 3;
+  display: grid;
+  grid-template-columns: minmax(0, auto) 2.75rem;
+  gap: 0.5rem;
+  width: auto;
+  max-width: min(22rem, calc(100vw - 2rem));
 }
 
 .mobile-toolbar-toggle,
@@ -354,8 +375,8 @@ body {
 .toolbar-brand {
   display: flex;
   align-items: center;
-  gap: 0.45rem;
-  padding: 0.05rem 0.05rem 0.65rem;
+  gap: 0.25rem;
+  padding: 0.05rem 0 0.6rem;
   border-bottom: 1px solid #e5e7eb;
 }
 
@@ -363,38 +384,42 @@ body {
   display: grid;
   place-items: center;
   flex: 0 0 auto;
-  width: 1.75rem;
-  height: 1.75rem;
-  border-radius: 0.55rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 0.5rem;
   background: #1f2937;
   color: #ffffff;
-  font-size: 0.82rem;
+  font-size: 0.76rem;
   font-weight: 800;
   letter-spacing: 0;
 }
 
 .toolbar-status {
+  overflow: hidden;
+  min-width: 0;
+  flex: 1 1 auto;
   color: #374151;
-  font-size: 0.78rem;
+  font-size: 0.68rem;
   font-weight: 750;
   line-height: 1;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .toolbar-close-button {
-  display: none;
+  display: grid;
   place-items: center;
   flex: 0 0 auto;
-  width: 1.9rem;
-  height: 1.9rem;
-  margin-left: auto;
+  width: 1.45rem;
+  height: 1.45rem;
+  margin-left: 0;
   padding: 0;
   border-radius: 999px;
 }
 
 .toolbar-close-button .tool-icon {
-  width: 1rem;
-  height: 1rem;
+  width: 0.9rem;
+  height: 0.9rem;
 }
 
 .toolbar-field,
@@ -418,8 +443,8 @@ body {
   position: relative;
   display: flex;
   align-items: center;
-  min-height: 2.25rem;
-  padding: 0 1.45rem 0 1.55rem;
+  min-height: 2.2rem;
+  padding: 0 1.35rem 0 1.45rem;
   border: 1px solid #e5e7eb;
   border-radius: 0.75rem;
   background: #ffffff;
@@ -456,7 +481,7 @@ body {
 
 .surface-current {
   overflow: hidden;
-  font-size: 0.76rem;
+  font-size: 0.74rem;
   font-weight: 750;
   line-height: 1;
   text-overflow: ellipsis;
@@ -480,23 +505,34 @@ body {
 }
 
 .color-swatch {
+  position: relative;
+  display: grid;
+  place-items: center;
   min-width: 0;
   width: 100%;
   aspect-ratio: 1;
   padding: 0;
   border: 1px solid #e5e7eb;
   border-radius: 999px;
-  background: var(--swatch-color, #111827);
+  background: #ffffff;
   box-shadow:
-    inset 0 0 0 1px rgb(255 255 255 / 0.55),
     0 1px 1px rgb(15 23 42 / 0.04);
   cursor: pointer;
+}
+
+.color-swatch::before {
+  content: "";
+  width: calc(100% - 0.35rem);
+  height: calc(100% - 0.35rem);
+  border-radius: inherit;
+  background: var(--swatch-color, #111827);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.5);
 }
 
 .color-swatch.is-active {
   border-color: #1f2937;
   box-shadow:
-    0 0 0 2px #fbfaf7,
+    0 0 0 2px #ffffff,
     0 0 0 4px #1f2937;
 }
 
@@ -556,12 +592,13 @@ body {
 .tool-row {
   display: flex;
   align-items: center;
-  gap: 0.45rem;
-  min-height: 2.35rem;
-  padding: 0 0.55rem;
+  gap: 0.38rem;
+  min-width: 0;
+  min-height: 2.28rem;
+  padding: 0 0.48rem;
   box-shadow: none;
   cursor: pointer;
-  font-size: 0.74rem;
+  font-size: 0.72rem;
   font-weight: 750;
   line-height: 1;
   text-align: left;
@@ -572,6 +609,12 @@ body {
     box-shadow 120ms ease,
     color 120ms ease,
     transform 120ms ease;
+}
+
+.tool-row span {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
 }
 
 .tool-row:hover {
@@ -593,8 +636,8 @@ body {
 
 .tool-icon {
   flex: 0 0 auto;
-  width: 1.375rem;
-  height: 1.375rem;
+  width: 1.25rem;
+  height: 1.25rem;
   fill: none;
   stroke: currentColor;
   stroke-linecap: round;
@@ -616,7 +659,7 @@ body {
 .toolbar-more-panel {
   position: fixed;
   bottom: 1rem;
-  left: 8.25rem;
+  left: 9rem;
   z-index: 4;
   display: grid;
   gap: 0.4rem;
@@ -728,6 +771,9 @@ body {
   border-color: #dc2626;
   background: #dc2626;
   color: #ffffff;
+  gap: 0.32rem;
+  padding-inline: 0.42rem;
+  font-size: 0.68rem;
 }
 
 .toolbar .danger-button.is-armed:hover {
@@ -750,13 +796,89 @@ body {
   right: 0.75rem;
   bottom: 0.75rem;
   margin: 0;
-  padding: 0.25rem 0.5rem;
-  border-radius: 0.25rem;
-  background: rgb(15 23 42 / 0.72);
+  padding: 0.4rem 0.65rem;
+  border: 1px solid rgb(255 255 255 / 0.18);
+  border-radius: 999px;
+  background: rgb(15 23 42 / 0.78);
   color: #ffffff;
-  font-size: 0.75rem;
+  font-size: 0.78rem;
+  font-weight: 760;
   line-height: 1.2;
+  box-shadow: 0 8px 28px rgb(15 23 42 / 0.18);
   pointer-events: none;
+}
+
+.viewer-status[data-viewer-connection="Connected"] {
+  background: rgb(31 41 55 / 0.72);
+}
+
+.viewer-status[data-viewer-connection="Disconnected"],
+.viewer-status[data-viewer-connection="Connection failed"] {
+  background: rgb(153 27 27 / 0.88);
+}
+
+.viewer-fullscreen-button {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  border: 1px solid rgb(255 255 255 / 0.2);
+  border-radius: 999px;
+  background: rgb(15 23 42 / 0.58);
+  color: #ffffff;
+  box-shadow: 0 8px 28px rgb(15 23 42 / 0.16);
+  cursor: pointer;
+  opacity: 0.38;
+  transition:
+    opacity 140ms ease,
+    background-color 140ms ease;
+}
+
+.viewer-fullscreen-button:hover,
+.viewer-fullscreen-button:focus-visible {
+  background: rgb(15 23 42 / 0.82);
+  opacity: 1;
+}
+
+.viewer-fullscreen-button .tool-icon {
+  width: 1.2rem;
+  height: 1.2rem;
+}
+
+.viewer-fullscreen-button[hidden] {
+  display: none;
+}
+
+.viewer-fullscreen-button[data-viewer-fullscreen-unsupported="true"] {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.viewer-install-hint {
+  position: absolute;
+  top: 3.35rem;
+  right: 0.75rem;
+  z-index: 4;
+  max-width: min(19rem, calc(100vw - 1.5rem));
+  margin: 0;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid rgb(255 255 255 / 0.2);
+  border-radius: 0.875rem;
+  background: rgb(15 23 42 / 0.84);
+  color: #ffffff;
+  box-shadow: 0 8px 28px rgb(15 23 42 / 0.18);
+  font-size: 0.76rem;
+  font-weight: 720;
+  line-height: 1.35;
+}
+
+.viewer-install-hint[hidden] {
+  display: none;
 }
 
 @media (max-width: 640px) {
@@ -800,6 +922,26 @@ body {
     grid-row: 2 / 4;
     width: 4.5rem;
     height: 4.5rem;
+  }
+
+  .viewer-fullscreen-button {
+    top: calc(0.75rem + env(safe-area-inset-top, 0px));
+    right: calc(0.75rem + env(safe-area-inset-right, 0px));
+    z-index: 4;
+    width: 2.75rem;
+    height: 2.75rem;
+    background: rgb(15 23 42 / 0.76);
+    opacity: 0.92;
+  }
+
+  .viewer-fullscreen-button .tool-icon {
+    width: 1.35rem;
+    height: 1.35rem;
+  }
+
+  .viewer-install-hint {
+    top: calc(3.85rem + env(safe-area-inset-top, 0px));
+    right: calc(0.75rem + env(safe-area-inset-right, 0px));
   }
 
   .toolbar {

@@ -3,8 +3,16 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="author" content="Pablo">
+    <meta name="theme-color" content="#172033">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="Onboard">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>Onboard</title>
-    <link rel="icon" href="data:,">
+    <link rel="icon" href="/icons/onboard.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/icons/onboard-180.png">
+    <link rel="manifest" href="/manifest.webmanifest">
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body class="home-page">
@@ -24,16 +32,6 @@
           <p data-share-status>Ready</p>
         </div>
         <div class="share-list" data-share-list></div>
-      </section>
-
-      <section class="share-panel compact-panel" aria-labelledby="advanced-title">
-        <div class="share-heading">
-          <h2 id="advanced-title">Advanced</h2>
-        </div>
-        <div class="home-actions compact-actions" aria-label="Open WebRTC surfaces">
-          <a href="/board?transport=webrtc">WebRTC Board</a>
-          <a href="/viewer?transport=webrtc">WebRTC Viewer</a>
-        </div>
       </section>
     </main>
     <script type="module" src="/home/home.js"></script>

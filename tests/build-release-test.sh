@@ -22,9 +22,12 @@ work_dir="$(mktemp -d "${TMPDIR:-/tmp}/onboard-release-test.XXXXXX")"
 cleanup() {
   rm -rf "$work_dir"
   rm -f dist/onboard-linux-amd64
+  rm -f dist/onboard-linux-arm64
   rm -f dist/onboard-windows-amd64.exe
+  rm -f dist/onboard-windows-arm64.exe
   rm -f dist/onboard-macos-amd64
   rm -f dist/onboard-macos-arm64
+  rm -f dist/checksums.txt
 }
 trap cleanup EXIT
 
@@ -77,6 +80,32 @@ check_output() {
 }
 
 check_output dist/onboard-linux-amd64 linux/amd64
+check_output dist/onboard-linux-arm64 linux/arm64
 check_output dist/onboard-windows-amd64.exe windows/amd64
+check_output dist/onboard-windows-arm64.exe windows/arm64
 check_output dist/onboard-macos-amd64 darwin/amd64
 check_output dist/onboard-macos-arm64 darwin/arm64
+
+if [[ ! -f dist/checksums.txt ]]; then
+  echo "expected dist/checksums.txt to be created" >&2
+  exit 1
+fi
+
+for output in \
+  onboard-linux-amd64 \
+  onboard-linux-arm64 \
+  onboard-windows-amd64.exe \
+  onboard-windows-arm64.exe \
+  onboard-macos-amd64 \
+  onboard-macos-arm64; do
+  if ! grep -q " ${output}$" dist/checksums.txt; then
+    echo "expected dist/checksums.txt to include $output" >&2
+    exit 1
+  fi
+done
+
+if command -v sha256sum >/dev/null 2>&1; then
+  (cd dist && sha256sum -c checksums.txt >/dev/null)
+elif command -v shasum >/dev/null 2>&1; then
+  (cd dist && shasum -a 256 -c checksums.txt >/dev/null)
+fi

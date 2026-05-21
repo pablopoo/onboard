@@ -1,6 +1,7 @@
 {
   "name": "onboard",
   "private": true,
+  "author": "Pablo",
   "packageManager": "npm@11.6.2",
   "engines": {
     "node": "24.11.1",
