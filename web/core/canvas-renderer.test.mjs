@@ -65,6 +65,9 @@ function makeContext() {
         globalAlpha: this.globalAlpha,
       });
     },
+    drawImage(...args) {
+      calls.push({ name: "drawImage", args });
+    },
     save() {
       stateStack.push({
         fillStyle: this.fillStyle,
@@ -206,6 +209,51 @@ test("renderBoardState paints surface background for supported surfaces", () => 
   }
 
   assert.equal(new Set(backgrounds.values()).size, 4);
+});
+
+test("renderBoardState draws image background inside the board viewport before strokes", () => {
+  const ctx = makeContext();
+  const image = {
+    complete: true,
+    naturalWidth: 1280,
+    naturalHeight: 720,
+  };
+
+  renderBoardState(
+    ctx,
+    makeState({
+      background: {
+        kind: "image",
+        dataUrl: "data:image/jpeg;base64,abc123",
+        width: 1280,
+        height: 720,
+      },
+      strokes: [makeStroke()],
+    }),
+    SIZE,
+    {
+      createImage() {
+        return image;
+      },
+    },
+  );
+
+  const drawImage = findCalls(ctx, "drawImage")[0];
+  assert.equal(drawImage.args[0], image);
+  assertViewport(
+    {
+      x: drawImage.args[1],
+      y: drawImage.args[2],
+      width: drawImage.args[3],
+      height: drawImage.args[4],
+    },
+    { x: 100 / 9, y: 0, width: 1600 / 9, height: 100 },
+  );
+
+  const drawImageIndex = ctx.calls.findIndex((call) => call.name === "drawImage");
+  const strokeIndex = ctx.calls.findIndex((call) => call.name === "stroke");
+  assert.ok(drawImageIndex > -1);
+  assert.ok(strokeIndex > drawImageIndex);
 });
 
 test("boardViewportForSize centers a 16:9 frame in wide canvases", () => {

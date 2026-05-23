@@ -745,6 +745,10 @@ await checkWithoutConsoleErrors("Board", async () => {
       "clear",
       "more",
       "copy-viewer",
+      "background-file",
+      "background-upload",
+      "background-capture",
+      "background-remove",
     ];
 
     return {
@@ -1004,6 +1008,59 @@ await checkWithoutConsoleErrors("High DPR resize drawing sync", async () => {
     });
   } finally {
     await highDPRContext.close();
+  }
+});
+
+await checkWithoutConsoleErrors("Image background upload sync", async () => {
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(boardUrl, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("[data-board-canvas]", { timeout: 5000 });
+  await clearBoardCanvas(page);
+
+  const viewerPage = await page.context().newPage();
+  try {
+    await checkPageWithoutConsoleErrors(viewerPage, "Image background viewer", async () => {
+      await viewerPage.setViewportSize({ width: 1000, height: 700 });
+      await viewerPage.goto(viewerUrl, { waitUntil: "domcontentloaded" });
+      await viewerPage.waitForSelector("[data-viewer-canvas]", { timeout: 5000 });
+      await viewerPage.waitForFunction(
+        () =>
+          document.querySelector("[data-viewer-status]")?.dataset
+            ?.viewerConnection === "Connected",
+        undefined,
+        { timeout: 5000 },
+      );
+
+      const svg = [
+        '<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90">',
+        '<rect width="160" height="90" fill="#ff0000"/>',
+        '</svg>',
+      ].join("");
+      await page.evaluate((contents) => {
+        const input = document.querySelector('[data-board-control="background-file"]');
+        const file = new File([contents], "background.svg", {
+          type: "image/svg+xml",
+        });
+        const files = new DataTransfer();
+        files.items.add(file);
+        input.files = files.files;
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      }, svg);
+
+      await waitForCenterColorNear(
+        viewerPage,
+        { red: 254, green: 0, blue: 0, alpha: 255 },
+        "uploaded image background",
+      );
+      await clearBoardCanvas(page);
+      await waitForCenterColorNear(
+        viewerPage,
+        { red: 248, green: 250, blue: 252, alpha: 255 },
+        "whiteboard after clearing image background",
+      );
+    });
+  } finally {
+    await viewerPage.close();
   }
 });
 

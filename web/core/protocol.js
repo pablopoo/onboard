@@ -1,5 +1,6 @@
 const EVENT_TYPES = new Set([
   "board:set-surface",
+  "board:set-background",
   "stroke:start",
   "stroke:point",
   "stroke:end",
@@ -22,6 +23,8 @@ const SURFACES = new Set([
 const MARKER_SURFACES = new Set(["whiteboard", "blueboard"]);
 const CHALK_SURFACES = new Set(["blackboard", "greenboard"]);
 const MAX_STROKE_WIDTH = 128;
+const MAX_BACKGROUND_DATA_URL_LENGTH = 6_000_000;
+const MAX_BACKGROUND_DIMENSION = 8192;
 
 let nextEventNumber = 1;
 
@@ -75,6 +78,10 @@ export function validateBoardEvent(event) {
     return validateSurfacePayload(event.payload);
   }
 
+  if (event.type === "board:set-background") {
+    return validateSetBackgroundPayload(event.payload);
+  }
+
   if (event.type === "stroke:start") {
     return validateStrokeStartPayload(event.payload);
   }
@@ -125,6 +132,46 @@ export function isToolAllowedForSurface(tool, surface) {
 function validateSurfacePayload(payload) {
   if (!SURFACES.has(payload.surface)) {
     return invalid("invalid surface");
+  }
+
+  return { valid: true };
+}
+
+function validateSetBackgroundPayload(payload) {
+  if (!hasOwn(payload, "background")) {
+    return invalid("missing background");
+  }
+
+  return validateBackgroundSnapshot(payload.background);
+}
+
+function validateBackgroundSnapshot(background) {
+  if (background === null) {
+    return { valid: true };
+  }
+
+  if (!isPlainObject(background)) {
+    return invalid("background must be an object or null");
+  }
+
+  if (background.kind !== "image") {
+    return invalid("background kind must be image");
+  }
+
+  if (
+    !isNonEmptyString(background.dataUrl) ||
+    !background.dataUrl.startsWith("data:image/") ||
+    background.dataUrl.length > MAX_BACKGROUND_DATA_URL_LENGTH
+  ) {
+    return invalid("background dataUrl must be a data:image URL");
+  }
+
+  if (!isValidBackgroundDimension(background.width)) {
+    return invalid("background width must be positive");
+  }
+
+  if (!isValidBackgroundDimension(background.height)) {
+    return invalid("background height must be positive");
   }
 
   return { valid: true };
@@ -205,6 +252,13 @@ function validateRestorePayload(payload) {
 
   if (!Array.isArray(payload.strokes)) {
     return invalid("strokes must be an array");
+  }
+
+  if (hasOwn(payload, "background")) {
+    const backgroundResult = validateBackgroundSnapshot(payload.background);
+    if (!backgroundResult.valid) {
+      return backgroundResult;
+    }
   }
 
   for (const stroke of payload.strokes) {
@@ -347,6 +401,14 @@ function isNonEmptyString(value) {
 
 function isUnitNumber(value) {
   return Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+function isValidBackgroundDimension(value) {
+  return (
+    Number.isFinite(value) &&
+    value > 0 &&
+    value <= MAX_BACKGROUND_DIMENSION
+  );
 }
 
 function hasOwn(value, property) {

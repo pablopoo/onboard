@@ -40,6 +40,9 @@ function createFakeElement(properties = {}) {
     replaceChildren(...children) {
       this.childrenList = [...children];
     },
+    click() {
+      return this.dispatch("click");
+    },
     querySelectorAll(selector) {
       const result = this.children?.get(selector);
       if (Array.isArray(result)) {
@@ -327,10 +330,12 @@ function createFakeWindow(options = {}) {
     removeEventListener(type, listener) {
       listeners.get(type)?.delete(listener);
     },
-    dispatch(type) {
+    dispatch(type, properties = {}) {
+      const event = createFakeEvent(type, this, properties);
       for (const listener of listeners.get(type) ?? []) {
-        listener();
+        listener(event);
       }
+      return event;
     },
     listenerCount(type) {
       return listeners.get(type)?.size ?? 0;
@@ -389,6 +394,11 @@ function createFixture(options = {}) {
     shareViewerInput: createFakeElement(),
     shareViewerQR: createFakeElement({ ownerDocument: createFakeDocument(null) }),
     copyViewerButton: createFakeElement(),
+    backgroundFileInput: createFakeElement({ files: [] }),
+    backgroundUploadButton: createFakeElement(),
+    backgroundCaptureButton: createFakeElement(),
+    backgroundRemoveButton: createFakeElement(),
+    backgroundStatus: createFakeElement(),
     toolbarToggleButton: createFakeElement(),
     toolbarCloseButton: createFakeElement(),
     mobileToolLabel: createFakeElement(),
@@ -417,6 +427,25 @@ function createFixture(options = {}) {
     resizeCanvasToDisplaySize:
       options.resizeCanvasToDisplaySize ?? (() => false),
     renderBoardState: (_ctx, snapshot) => renders.push(snapshot),
+    readBackgroundFile:
+      options.readBackgroundFile ??
+      (() =>
+        Promise.resolve({
+          kind: "image",
+          dataUrl: "data:image/jpeg;base64,fixture",
+          width: 1280,
+          height: 720,
+        })),
+    captureDisplayBackground:
+      options.captureDisplayBackground ??
+      (() =>
+        Promise.resolve({
+          kind: "image",
+          dataUrl: "data:image/jpeg;base64,capture",
+          width: 1280,
+          height: 720,
+        })),
+    screenCaptureSupported: options.screenCaptureSupported ?? (() => true),
     reportError:
       options.reportError ??
       ((error) => {
@@ -457,6 +486,11 @@ function createBoardAppRoot() {
     ["[data-board-share-input]", createFakeElement()],
     ["[data-board-share-qr]", createFakeElement({ ownerDocument: createFakeDocument(null) })],
     ["[data-board-control='copy-viewer']", createFakeElement()],
+    ["[data-board-control='background-file']", createFakeElement({ files: [] })],
+    ["[data-board-control='background-upload']", createFakeElement()],
+    ["[data-board-control='background-capture']", createFakeElement()],
+    ["[data-board-control='background-remove']", createFakeElement()],
+    ["[data-board-background-status]", createFakeElement()],
     ["[data-board-control='toolbar-toggle']", createFakeElement()],
     ["[data-board-control='toolbar-close']", createFakeElement()],
     ["[data-mobile-tool-label]", createFakeElement()],
@@ -1175,6 +1209,128 @@ test("more panel reports copy failure when fallback clipboard copy fails", async
   } finally {
     globalThis.document = previousDocument;
   }
+});
+
+test("background file input publishes a shared image background", async () => {
+  const file = { name: "slide.png", type: "image/png" };
+  const readFiles = [];
+  const { controller, elements, transport } = createFixture({
+    readBackgroundFile(selectedFile) {
+      readFiles.push(selectedFile);
+      return Promise.resolve({
+        kind: "image",
+        dataUrl: "data:image/png;base64,uploaded",
+        width: 1024,
+        height: 768,
+      });
+    },
+  });
+
+  await controller.connect();
+  elements.backgroundFileInput.files = [file];
+  elements.backgroundFileInput.dispatch("change");
+  await flushAsyncWork();
+
+  assert.deepEqual(readFiles, [file]);
+  assert.equal(transport.sent.at(-1).type, "board:set-background");
+  assert.deepEqual(transport.sent.at(-1).payload.background, {
+    kind: "image",
+    dataUrl: "data:image/png;base64,uploaded",
+    width: 1024,
+    height: 768,
+  });
+  assert.deepEqual(controller.getSnapshot().background, {
+    kind: "image",
+    dataUrl: "data:image/png;base64,uploaded",
+    width: 1024,
+    height: 768,
+  });
+  assert.equal(elements.backgroundStatus.textContent, "Image set");
+});
+
+test("pasting an image file publishes it as the shared background", async () => {
+  const fakeWindow = createFakeWindow();
+  const imageFile = { name: "clip.png", type: "image/png" };
+  const { controller, transport } = createFixture({
+    window: fakeWindow,
+    readBackgroundFile(file) {
+      assert.equal(file, imageFile);
+      return Promise.resolve({
+        kind: "image",
+        dataUrl: "data:image/png;base64,pasted",
+        width: 640,
+        height: 360,
+      });
+    },
+  });
+
+  await controller.connect();
+  fakeWindow.dispatch("paste", {
+    clipboardData: {
+      files: [imageFile],
+      items: [],
+    },
+  });
+  await flushAsyncWork();
+
+  assert.equal(transport.sent.at(-1).type, "board:set-background");
+  assert.equal(transport.sent.at(-1).payload.background.dataUrl, "data:image/png;base64,pasted");
+});
+
+test("capture button publishes a display screenshot background when supported", async () => {
+  const captures = [];
+  const { controller, elements, transport } = createFixture({
+    captureDisplayBackground() {
+      captures.push("capture");
+      return Promise.resolve({
+        kind: "image",
+        dataUrl: "data:image/jpeg;base64,captured",
+        width: 1920,
+        height: 1080,
+      });
+    },
+  });
+
+  await controller.connect();
+  elements.backgroundCaptureButton.dispatch("click");
+  await flushAsyncWork();
+
+  assert.deepEqual(captures, ["capture"]);
+  assert.equal(transport.sent.at(-1).type, "board:set-background");
+  assert.deepEqual(transport.sent.at(-1).payload.background, {
+    kind: "image",
+    dataUrl: "data:image/jpeg;base64,captured",
+    width: 1920,
+    height: 1080,
+  });
+  assert.equal(elements.backgroundCaptureButton.disabled, false);
+});
+
+test("unsupported capture disables the capture button but keeps upload and paste available", async () => {
+  const { controller, elements } = createFixture({
+    screenCaptureSupported: () => false,
+  });
+
+  await controller.connect();
+
+  assert.equal(elements.backgroundCaptureButton.disabled, true);
+  assert.equal(elements.backgroundCaptureButton.attributes.get("aria-disabled"), "true");
+  assert.equal(elements.backgroundUploadButton.disabled, false);
+});
+
+test("remove background publishes a null shared background", async () => {
+  const { controller, elements, transport } = createFixture();
+
+  await controller.connect();
+  elements.backgroundFileInput.files = [{ name: "slide.jpg", type: "image/jpeg" }];
+  elements.backgroundFileInput.dispatch("change");
+  await flushAsyncWork();
+
+  elements.backgroundRemoveButton.dispatch("click");
+
+  assert.equal(transport.sent.at(-1).type, "board:set-background");
+  assert.deepEqual(transport.sent.at(-1).payload, { background: null });
+  assert.equal(controller.getSnapshot().background, null);
 });
 
 test("mobile toolbar collapses by default and updates compact status", async () => {

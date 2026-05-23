@@ -431,6 +431,42 @@ func TestRelayIgnoresSemanticallyInvalidBoardEvents(t *testing.T) {
 	}
 }
 
+func TestRelayBroadcastsBackgroundEventToViewer(t *testing.T) {
+	t.Parallel()
+
+	relayHub := hub.New()
+	testServer := httptest.NewServer(server.New(server.Config{
+		Mode:     "local",
+		RelayHub: relayHub,
+	}))
+	t.Cleanup(testServer.Close)
+
+	sender := dialRelayRole(t, testServer, "board")
+	defer closeWebSocket(t, sender)
+	receiver := dialRelay(t, testServer)
+	defer closeWebSocket(t, receiver)
+
+	event := backgroundEvent("evt-background")
+	writeRelayEvent(t, sender, event)
+
+	got := readRelayEvent(t, receiver)
+	if !reflectEvent(got, event) {
+		t.Fatalf("background event = %#v, want %#v", got, event)
+	}
+
+	snapshot := relayHub.Snapshot()
+	if len(snapshot) != 1 {
+		t.Fatalf("snapshot length = %d, want 1", len(snapshot))
+	}
+	background, ok := snapshot[0].Payload["background"].(map[string]any)
+	if !ok {
+		t.Fatalf("snapshot background = %#v, want object", snapshot[0].Payload["background"])
+	}
+	if background["dataUrl"] != "data:image/jpeg;base64,abc123" {
+		t.Fatalf("snapshot background dataUrl = %#v, want data URL", background["dataUrl"])
+	}
+}
+
 func TestRelayAcceptsLargeValidRestoreSnapshots(t *testing.T) {
 	t.Parallel()
 
@@ -597,6 +633,23 @@ func serverTestEvent(id string, eventType string) hub.Event {
 		}
 	}
 	return event
+}
+
+func backgroundEvent(id string) hub.Event {
+	return hub.Event{
+		ID:      id,
+		Type:    "board:set-background",
+		BoardID: "board-1",
+		At:      100,
+		Payload: map[string]any{
+			"background": map[string]any{
+				"kind":    "image",
+				"dataUrl": "data:image/jpeg;base64,abc123",
+				"width":   float64(1280),
+				"height":  float64(720),
+			},
+		},
+	}
 }
 
 func largeRestoreEvent(t *testing.T, id string, pointCount int) hub.Event {

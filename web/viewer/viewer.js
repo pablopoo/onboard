@@ -179,7 +179,7 @@ export function createViewerController({
         width: canvas.width,
         height: canvas.height,
       },
-      { now: renderNow },
+      { now: renderNow, onBackgroundLoad: scheduleRender },
     );
     scheduleNextEphemeralRender(snapshot, renderNow);
   }

@@ -36,6 +36,7 @@ test("default state uses whiteboard and empty strokes/map", () => {
   const state = createBoardState();
 
   assert.equal(state.surface, "whiteboard");
+  assert.equal(state.background, null);
   assert.deepEqual(state.strokes, []);
   assert.ok(state.activeStrokes instanceof Map);
   assert.equal(state.activeStrokes.size, 0);
@@ -43,6 +44,30 @@ test("default state uses whiteboard and empty strokes/map", () => {
   assert.equal(state.appliedEventIds.size, 0);
   assert.deepEqual(state.appliedEventIdOrder, []);
   assert.deepEqual(state.pointer, { visible: false, point: null });
+});
+
+test("board:set-background updates the shared background image", () => {
+  const state = createBoardState();
+  const background = {
+    kind: "image",
+    dataUrl: "data:image/jpeg;base64,abc123",
+    width: 1280,
+    height: 720,
+  };
+
+  applyBoardEvent(state, makeEvent("board:set-background", { background }));
+  background.width = 1;
+
+  assert.deepEqual(state.background, {
+    kind: "image",
+    dataUrl: "data:image/jpeg;base64,abc123",
+    width: 1280,
+    height: 720,
+  });
+
+  applyBoardEvent(state, makeEvent("board:set-background", { background: null }));
+
+  assert.equal(state.background, null);
 });
 
 test("board:set-surface changes board surface", () => {
@@ -265,6 +290,12 @@ test("board:restore replaces snapshot state and rebuilds activeStrokes", () => {
   const state = createBoardState();
   const payload = {
     surface: "greenboard",
+    background: {
+      kind: "image",
+      dataUrl: "data:image/png;base64,restored",
+      width: 640,
+      height: 360,
+    },
     strokes: [
       {
         strokeId: "restored_1",
@@ -294,6 +325,12 @@ test("board:restore replaces snapshot state and rebuilds activeStrokes", () => {
   payload.pointer.point.y = 0.88;
 
   assert.equal(state.surface, "greenboard");
+  assert.deepEqual(state.background, {
+    kind: "image",
+    dataUrl: "data:image/png;base64,restored",
+    width: 640,
+    height: 360,
+  });
   assert.deepEqual(state.strokes, [
     {
       strokeId: "restored_1",
@@ -363,6 +400,17 @@ test("restored active stroke accepts subsequent stroke points and end events", (
 test("board:clear removes strokes, clears activeStrokes, and hides pointer", () => {
   const state = createBoardState();
 
+  applyBoardEvent(
+    state,
+    makeEvent("board:set-background", {
+      background: {
+        kind: "image",
+        dataUrl: "data:image/jpeg;base64,abc123",
+        width: 1280,
+        height: 720,
+      },
+    }),
+  );
   applyBoardEvent(state, makeStrokeStart("stroke_1"));
   applyBoardEvent(
     state,
@@ -370,6 +418,7 @@ test("board:clear removes strokes, clears activeStrokes, and hides pointer", () 
   );
   applyBoardEvent(state, makeEvent("board:clear"));
 
+  assert.equal(state.background, null);
   assert.deepEqual(state.strokes, []);
   assert.equal(state.activeStrokes.size, 0);
   assert.deepEqual(state.pointer, { visible: false, point: null });
@@ -408,6 +457,7 @@ test("snapshotBoardState returns serializable object and no Map", () => {
 
   assert.deepEqual(snapshot, {
     surface: "whiteboard",
+    background: null,
     strokes: [
       {
         strokeId: "stroke_1",

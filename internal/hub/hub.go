@@ -235,10 +235,11 @@ func cloneEvent(event Event) Event {
 }
 
 type boardSnapshot struct {
-	surface string
-	strokes []map[string]any
-	active  map[string]int
-	pointer map[string]any
+	surface    string
+	background map[string]any
+	strokes    []map[string]any
+	active     map[string]int
+	pointer    map[string]any
 }
 
 func newBoardSnapshot() boardSnapshot {
@@ -258,6 +259,16 @@ func (s *boardSnapshot) Apply(event Event) bool {
 		if surface, ok := payload["surface"].(string); ok && surface != "" {
 			s.surface = surface
 		}
+	case "board:set-background":
+		if payload["background"] == nil {
+			s.background = nil
+			break
+		}
+		background, ok := payload["background"].(map[string]any)
+		if !ok {
+			return false
+		}
+		s.background = clonePayload(background)
 	case "stroke:start":
 		strokeID, ok := payloadString(payload, "strokeId")
 		if !ok {
@@ -321,6 +332,7 @@ func (s *boardSnapshot) Apply(event Event) bool {
 	case "board:restore":
 		s.restore(payload)
 	case "board:clear":
+		s.background = nil
 		s.strokes = nil
 		s.active = make(map[string]int)
 		s.pointer = hiddenPointer()
@@ -345,7 +357,8 @@ func (s *boardSnapshot) RestoreEvent(source Event) Event {
 		BoardID: source.BoardID,
 		At:      source.At,
 		Payload: map[string]any{
-			"surface": s.surface,
+			"surface":    s.surface,
+			"background": cloneOptionalPayload(s.background),
 			"strokes": s.currentStrokes(
 				float64(time.Now().UnixMilli()),
 			),
@@ -386,6 +399,11 @@ func (s *boardSnapshot) restore(payload map[string]any) {
 		s.pointer = clonePayload(pointer)
 	} else {
 		s.pointer = hiddenPointer()
+	}
+	if background, ok := payload["background"].(map[string]any); ok {
+		s.background = clonePayload(background)
+	} else {
+		s.background = nil
 	}
 	s.rebuildActive()
 }
@@ -503,6 +521,13 @@ func clonePayload(payload map[string]any) map[string]any {
 		cloned[key] = cloneValue(value)
 	}
 	return cloned
+}
+
+func cloneOptionalPayload(payload map[string]any) any {
+	if payload == nil {
+		return nil
+	}
+	return clonePayload(payload)
 }
 
 func cloneValue(value any) any {

@@ -86,6 +86,9 @@ const ERASER_WIDTH_RANGE = { min: 8, max: 48 };
 const EPHEMERAL_DELAY_MS = 4_000;
 const CLEAR_CONFIRM_MS = 3_000;
 const FINAL_POINT_EPSILON = 0.000001;
+const BACKGROUND_MAX_WIDTH = 1920;
+const BACKGROUND_MAX_HEIGHT = 1080;
+const BACKGROUND_JPEG_QUALITY = 0.88;
 const SESSION_STATUS_LABELS = {
   "Relay connecting": "Connecting",
   "Relay connected": "Relay",
@@ -116,6 +119,9 @@ export function createBoardController({
   reportError = defaultReportError,
   renderBoardState = defaultRenderBoardState,
   resizeCanvasToDisplaySize = defaultResizeCanvasToDisplaySize,
+  readBackgroundFile = defaultReadBackgroundFile,
+  captureDisplayBackground = defaultCaptureDisplayBackground,
+  screenCaptureSupported = defaultScreenCaptureSupported,
   ResizeObserverImpl = globalThis.ResizeObserver,
   window = globalThis.window,
   maxQueuedEvents = 1_000,
@@ -193,6 +199,7 @@ export function createBoardController({
       ? transport.onStatus(handleTransportStatus)
       : () => {};
   const cleanupResizeRendering = setupResizeRendering();
+  const cleanupPasteHandling = setupPasteHandling();
 
   updateViewerShareElements(elements, currentViewerURL);
   updateMorePanel();
@@ -214,6 +221,7 @@ export function createBoardController({
       unsubscribe();
       unsubscribeStatus();
       cleanupResizeRendering();
+      cleanupPasteHandling();
       clearExpirationTimers();
       resetClearConfirmation();
       cancelScheduledRender();
@@ -253,6 +261,22 @@ export function createBoardController({
     elements.quickUndoButton?.addEventListener("click", handleUndo);
     elements.moreButton?.addEventListener("click", handleMoreToggle);
     elements.copyViewerButton?.addEventListener("click", handleCopyViewerLink);
+    elements.backgroundUploadButton?.addEventListener(
+      "click",
+      handleBackgroundUpload,
+    );
+    elements.backgroundFileInput?.addEventListener(
+      "change",
+      handleBackgroundFileChange,
+    );
+    elements.backgroundCaptureButton?.addEventListener(
+      "click",
+      handleBackgroundCapture,
+    );
+    elements.backgroundRemoveButton?.addEventListener(
+      "click",
+      handleBackgroundRemove,
+    );
     elements.toolbarToggleButton?.addEventListener("click", handleToolbarToggle);
     elements.toolbarCloseButton?.addEventListener("click", handleToolbarClose);
 
@@ -329,7 +353,11 @@ export function createBoardController({
     }
 
     const snapshot = snapshotBoardState(state);
-    if (snapshot.strokes.length === 0 && !snapshot.pointer.visible) {
+    if (
+      snapshot.strokes.length === 0 &&
+      !snapshot.pointer.visible &&
+      !snapshot.background
+    ) {
       resetClearConfirmation();
       return;
     }
@@ -387,6 +415,57 @@ export function createBoardController({
     setTimer?.(() => {
       setCopyViewerButtonLabel("Copy");
     }, 1200);
+  }
+
+  function handleBackgroundUpload(event) {
+    event.preventDefault?.();
+    if (presenterLocked) {
+      return;
+    }
+
+    elements.backgroundFileInput?.click?.();
+  }
+
+  async function handleBackgroundFileChange(event) {
+    event.preventDefault?.();
+    if (presenterLocked) {
+      return;
+    }
+
+    const file = firstImageFile(elements.backgroundFileInput?.files);
+    if (!file) {
+      return;
+    }
+
+    await setBackgroundFromFile(file);
+    if (elements.backgroundFileInput) {
+      elements.backgroundFileInput.value = "";
+    }
+  }
+
+  async function handleBackgroundCapture(event) {
+    event.preventDefault?.();
+    if (presenterLocked || !screenCaptureSupported()) {
+      return;
+    }
+
+    try {
+      setBackgroundStatus("Capturing");
+      const background = await captureDisplayBackground();
+      publishBackground(background, "Image set");
+    } catch (error) {
+      reportError(error);
+      setBackgroundStatus("Capture failed");
+    }
+  }
+
+  function handleBackgroundRemove(event) {
+    event.preventDefault?.();
+    if (presenterLocked || !state.background) {
+      return;
+    }
+
+    publishBackground(null, "Image removed");
   }
 
   function handleUndo(event) {
@@ -620,6 +699,60 @@ export function createBoardController({
     return event;
   }
 
+  async function setBackgroundFromFile(file) {
+    try {
+      setBackgroundStatus("Loading");
+      const background = await readBackgroundFile(file);
+      publishBackground(background, "Image set");
+    } catch (error) {
+      reportError(error);
+      setBackgroundStatus("Image failed");
+    }
+  }
+
+  function publishBackground(background, statusMessage) {
+    const snapshot = snapshotBoardState(state);
+    const event = publish("board:set-background", { background });
+    if (!event) {
+      setBackgroundStatus("Image failed");
+      return null;
+    }
+
+    undoStack.push({ type: "restore", snapshot });
+    setBackgroundStatus(statusMessage);
+    updateControls();
+    return event;
+  }
+
+  function setupPasteHandling() {
+    if (
+      !window ||
+      typeof window.addEventListener !== "function" ||
+      typeof window.removeEventListener !== "function"
+    ) {
+      return () => {};
+    }
+
+    window.addEventListener("paste", handlePaste);
+    return () => {
+      window.removeEventListener("paste", handlePaste);
+    };
+  }
+
+  function handlePaste(event) {
+    if (presenterLocked) {
+      return;
+    }
+
+    const file = imageFileFromClipboard(event?.clipboardData);
+    if (!file) {
+      return;
+    }
+
+    event.preventDefault?.();
+    void setBackgroundFromFile(file);
+  }
+
   function canAcceptEvent() {
     if (connectionState === "open") {
       return true;
@@ -788,10 +921,15 @@ export function createBoardController({
   function render() {
     pendingRenderFrame = null;
     resizeCanvasToDisplaySize(canvas);
-    renderBoardState(ctx, snapshotBoardState(state), {
-      width: canvas.width,
-      height: canvas.height,
-    });
+    renderBoardState(
+      ctx,
+      snapshotBoardState(state),
+      {
+        width: canvas.width,
+        height: canvas.height,
+      },
+      { onBackgroundLoad: scheduleRender },
+    );
   }
 
   function scheduleRender() {
@@ -1116,6 +1254,27 @@ export function createBoardController({
       elements.copyViewerButton.disabled =
         presenterLocked || !currentViewerURL;
     }
+    if (elements.backgroundFileInput) {
+      elements.backgroundFileInput.disabled = presenterLocked;
+    }
+    if (elements.backgroundUploadButton) {
+      elements.backgroundUploadButton.disabled = presenterLocked;
+    }
+    if (elements.backgroundCaptureButton) {
+      const captureDisabled = presenterLocked || !screenCaptureSupported();
+      elements.backgroundCaptureButton.disabled = captureDisabled;
+      elements.backgroundCaptureButton.setAttribute?.(
+        "aria-disabled",
+        String(captureDisabled),
+      );
+      elements.backgroundCaptureButton.title = captureDisabled
+        ? "Capture requires HTTPS or localhost"
+        : "Capture window";
+    }
+    if (elements.backgroundRemoveButton) {
+      elements.backgroundRemoveButton.disabled =
+        presenterLocked || !state.background;
+    }
   }
 
   function controlElements() {
@@ -1131,6 +1290,9 @@ export function createBoardController({
       elements.moreButton,
       elements.copyViewerButton,
       elements.quickUndoButton,
+      elements.backgroundFileInput,
+      elements.backgroundUploadButton,
+      elements.backgroundRemoveButton,
       ...(elements.colorButtons ?? []),
     ];
   }
@@ -1173,6 +1335,10 @@ export function createBoardController({
     if (elements.copyViewerButton) {
       elements.copyViewerButton.textContent = label;
     }
+  }
+
+  function setBackgroundStatus(message) {
+    setText(elements.backgroundStatus, message);
   }
 }
 
@@ -1220,6 +1386,19 @@ export function createBoardApp({
       shareViewerInput: root.querySelector("[data-board-share-input]"),
       shareViewerQR: root.querySelector("[data-board-share-qr]"),
       copyViewerButton: root.querySelector("[data-board-control='copy-viewer']"),
+      backgroundFileInput: root.querySelector(
+        "[data-board-control='background-file']",
+      ),
+      backgroundUploadButton: root.querySelector(
+        "[data-board-control='background-upload']",
+      ),
+      backgroundCaptureButton: root.querySelector(
+        "[data-board-control='background-capture']",
+      ),
+      backgroundRemoveButton: root.querySelector(
+        "[data-board-control='background-remove']",
+      ),
+      backgroundStatus: root.querySelector("[data-board-background-status]"),
       toolbarToggleButton: root.querySelector(
         "[data-board-control='toolbar-toggle']",
       ),
@@ -1251,6 +1430,187 @@ export function createBoardApp({
   });
 
   return controller;
+}
+
+function defaultScreenCaptureSupported() {
+  return Boolean(
+    globalThis.isSecureContext &&
+      globalThis.navigator?.mediaDevices?.getDisplayMedia,
+  );
+}
+
+async function defaultReadBackgroundFile(file) {
+  if (!isImageFile(file)) {
+    throw new TypeError("background file must be an image");
+  }
+
+  return backgroundFromDataUrl(await readFileAsDataURL(file));
+}
+
+async function defaultCaptureDisplayBackground() {
+  const mediaDevices = globalThis.navigator?.mediaDevices;
+  if (typeof mediaDevices?.getDisplayMedia !== "function") {
+    throw new Error("display capture is unavailable");
+  }
+
+  const stream = await mediaDevices.getDisplayMedia({
+    video: true,
+    audio: false,
+  });
+
+  try {
+    return await backgroundFromMediaStream(stream);
+  } finally {
+    for (const track of stream.getTracks?.() ?? []) {
+      track.stop?.();
+    }
+  }
+}
+
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      resolve(String(reader.result ?? ""));
+    });
+    reader.addEventListener("error", () => {
+      reject(reader.error ?? new Error("image read failed"));
+    });
+    reader.readAsDataURL(file);
+  });
+}
+
+async function backgroundFromDataUrl(dataUrl) {
+  const image = await loadImage(dataUrl);
+  return backgroundFromDrawable(
+    image,
+    image.naturalWidth || image.width,
+    image.naturalHeight || image.height,
+  );
+}
+
+function loadImage(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.addEventListener("load", () => resolve(image), { once: true });
+    image.addEventListener(
+      "error",
+      () => reject(new Error("image decode failed")),
+      { once: true },
+    );
+    image.src = dataUrl;
+  });
+}
+
+async function backgroundFromMediaStream(stream) {
+  const document = globalThis.document;
+  if (!document?.createElement) {
+    throw new Error("document is unavailable for capture");
+  }
+
+  const video = document.createElement("video");
+  video.muted = true;
+  video.playsInline = true;
+  video.srcObject = stream;
+
+  await waitForVideoReady(video);
+  return backgroundFromDrawable(
+    video,
+    video.videoWidth || BACKGROUND_MAX_WIDTH,
+    video.videoHeight || BACKGROUND_MAX_HEIGHT,
+  );
+}
+
+async function waitForVideoReady(video) {
+  if (typeof video.play === "function") {
+    await video.play();
+  }
+
+  if (video.readyState < 2) {
+    await new Promise((resolve, reject) => {
+      video.addEventListener("loadeddata", resolve, { once: true });
+      video.addEventListener(
+        "error",
+        () => reject(new Error("capture video failed")),
+        { once: true },
+      );
+    });
+  }
+
+  await new Promise((resolve) => {
+    if (typeof video.requestVideoFrameCallback === "function") {
+      video.requestVideoFrameCallback(() => resolve());
+      return;
+    }
+
+    globalThis.setTimeout?.(resolve, 100);
+  });
+}
+
+function backgroundFromDrawable(drawable, sourceWidth, sourceHeight) {
+  const document = globalThis.document;
+  if (!document?.createElement) {
+    throw new Error("document is unavailable for image processing");
+  }
+
+  const size = fitInside(
+    sourceWidth,
+    sourceHeight,
+    BACKGROUND_MAX_WIDTH,
+    BACKGROUND_MAX_HEIGHT,
+  );
+  const canvas = document.createElement("canvas");
+  canvas.width = size.width;
+  canvas.height = size.height;
+
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(drawable, 0, 0, canvas.width, canvas.height);
+
+  return {
+    kind: "image",
+    dataUrl: canvas.toDataURL("image/jpeg", BACKGROUND_JPEG_QUALITY),
+    width: canvas.width,
+    height: canvas.height,
+  };
+}
+
+function fitInside(width, height, maxWidth, maxHeight) {
+  const safeWidth = Number.isFinite(width) && width > 0 ? width : maxWidth;
+  const safeHeight = Number.isFinite(height) && height > 0 ? height : maxHeight;
+  const scale = Math.min(1, maxWidth / safeWidth, maxHeight / safeHeight);
+
+  return {
+    width: Math.max(1, Math.round(safeWidth * scale)),
+    height: Math.max(1, Math.round(safeHeight * scale)),
+  };
+}
+
+function imageFileFromClipboard(clipboardData) {
+  const directFile = firstImageFile(clipboardData?.files);
+  if (directFile) {
+    return directFile;
+  }
+
+  for (const item of Array.from(clipboardData?.items ?? [])) {
+    if (String(item?.type ?? "").startsWith("image/")) {
+      const file = item.getAsFile?.();
+      if (file) {
+        return file;
+      }
+    }
+  }
+
+  return null;
+}
+
+function firstImageFile(files) {
+  return Array.from(files ?? []).find(isImageFile) ?? null;
+}
+
+function isImageFile(file) {
+  return String(file?.type ?? "").startsWith("image/");
 }
 
 function surfaceName(value) {

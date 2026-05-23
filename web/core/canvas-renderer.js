@@ -9,6 +9,8 @@ const DEFAULT_SURFACE = "whiteboard";
 const DEFAULT_BOARD_ASPECT_RATIO = 16 / 9;
 const RENDER_CACHES = new WeakMap();
 const CHALK_PARTICLES_PER_STAMP = 9;
+const BACKGROUND_IMAGE_CACHE = new Map();
+const BACKGROUND_IMAGE_CACHE_LIMIT = 8;
 
 export function boardViewportForSize(size, aspectRatio = DEFAULT_BOARD_ASPECT_RATIO) {
   const width = Math.max(0, size?.width ?? 0);
@@ -48,7 +50,8 @@ export function renderBoardState(ctx, state, size, options = {}) {
   const background = surfaceBackground(surface);
   const now = Number.isFinite(options.now) ? options.now : Date.now();
   const viewport = boardViewportForSize(size, options.aspectRatio);
-  const cache = getRenderCache(ctx, size, surface);
+  const backgroundImage = backgroundImageForState(state, options);
+  const cache = backgroundImage ? null : getRenderCache(ctx, size, surface);
 
   if (cache) {
     renderBoardStateWithCache(ctx, cache, state, size, viewport, background, now);
@@ -59,6 +62,7 @@ export function renderBoardState(ctx, state, size, options = {}) {
   ctx.save();
   ctx.fillStyle = background;
   ctx.fillRect(viewport.x, viewport.y, viewport.width, viewport.height);
+  drawBackgroundImage(ctx, backgroundImage, state?.background, viewport);
 
   for (const stroke of state?.strokes ?? []) {
     if (isExpired(stroke, now)) {
@@ -70,6 +74,120 @@ export function renderBoardState(ctx, state, size, options = {}) {
 
   drawPointer(ctx, state?.pointer, viewport);
   ctx.restore();
+}
+
+function backgroundImageForState(state, options) {
+  const background = state?.background;
+  if (background?.kind !== "image" || typeof background.dataUrl !== "string") {
+    return null;
+  }
+
+  const entry = imageCacheEntry(background.dataUrl, options);
+  const image = entry?.image;
+  const loaded =
+    entry?.loaded === true ||
+    (image?.complete === true && Number(image.naturalWidth) > 0);
+
+  return loaded ? image : null;
+}
+
+function imageCacheEntry(dataUrl, options) {
+  let entry = BACKGROUND_IMAGE_CACHE.get(dataUrl);
+  if (entry) {
+    return entry;
+  }
+
+  const createImage = options.createImage ?? defaultCreateImage;
+  const image = createImage?.();
+  if (!image) {
+    return null;
+  }
+
+  entry = { image, loaded: false };
+  BACKGROUND_IMAGE_CACHE.set(dataUrl, entry);
+  trimBackgroundImageCache();
+
+  const handleLoad = () => {
+    entry.loaded = true;
+    options.onBackgroundLoad?.();
+  };
+
+  if (typeof image.addEventListener === "function") {
+    image.addEventListener("load", handleLoad, { once: true });
+    image.addEventListener(
+      "error",
+      () => {
+        BACKGROUND_IMAGE_CACHE.delete(dataUrl);
+      },
+      { once: true },
+    );
+  } else {
+    image.onload = handleLoad;
+    image.onerror = () => {
+      BACKGROUND_IMAGE_CACHE.delete(dataUrl);
+    };
+  }
+
+  image.src = dataUrl;
+  if (image.complete === true && Number(image.naturalWidth) > 0) {
+    entry.loaded = true;
+  }
+
+  return entry;
+}
+
+function defaultCreateImage() {
+  if (typeof Image === "function") {
+    return new Image();
+  }
+
+  return null;
+}
+
+function trimBackgroundImageCache() {
+  while (BACKGROUND_IMAGE_CACHE.size > BACKGROUND_IMAGE_CACHE_LIMIT) {
+    const oldestKey = BACKGROUND_IMAGE_CACHE.keys().next().value;
+    BACKGROUND_IMAGE_CACHE.delete(oldestKey);
+  }
+}
+
+function drawBackgroundImage(ctx, image, background, viewport) {
+  if (!image || typeof ctx.drawImage !== "function") {
+    return;
+  }
+
+  const rect = containRect(
+    viewport,
+    background?.width || image.naturalWidth,
+    background?.height || image.naturalHeight,
+  );
+  ctx.drawImage(image, rect.x, rect.y, rect.width, rect.height);
+}
+
+function containRect(viewport, sourceWidth, sourceHeight) {
+  const imageAspect =
+    Number.isFinite(sourceWidth) && Number.isFinite(sourceHeight) && sourceHeight > 0
+      ? sourceWidth / sourceHeight
+      : viewport.width / viewport.height;
+  const viewportAspect = viewport.width / viewport.height;
+
+  if (imageAspect > viewportAspect) {
+    const height = viewport.width / imageAspect;
+    return {
+      x: viewport.x,
+      y: viewport.y + (viewport.height - height) / 2,
+      width: viewport.width,
+      height,
+    };
+  }
+
+  const width = viewport.height * imageAspect;
+  return {
+    x: viewport.x + (viewport.width - width) / 2,
+    y: viewport.y,
+    width,
+    height: viewport.height,
+  };
 }
 
 function renderBoardStateWithCache(ctx, cache, state, size, viewport, background, now) {

@@ -146,6 +146,7 @@ Why:
 Core event types:
 
 - `board:set-surface`
+- `board:set-background`
 - `stroke:start`
 - `stroke:point`
 - `stroke:end`
@@ -191,6 +192,7 @@ drawing and must not create strokes.
 The Viewer is content-only. It shows:
 
 - Board background.
+- Shared image background loaded, pasted, or captured by the presenter.
 - Strokes.
 - Eraser effects.
 - Explicit pointer only when the presenter uses pointer mode.
@@ -205,6 +207,8 @@ Board state lives in memory in the local Go process.
 
 - Restarting the server clears the board.
 - A newly connected viewer receives the current in-memory board snapshot.
+- Shared image backgrounds are kept in memory as compressed data URLs with the
+  current board snapshot.
 - Persistence is deferred until repeated real use proves it is needed.
 
 ## Release Builds

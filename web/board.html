@@ -183,6 +183,22 @@
             <a href="/viewer" data-board-share-link>Open</a>
             <button type="button" data-board-control="copy-viewer">Copy</button>
           </div>
+          <div class="toolbar-background-panel" aria-label="Background image">
+            <span class="control-label">Background</span>
+            <input
+              class="sr-only"
+              type="file"
+              accept="image/*"
+              data-board-control="background-file"
+              aria-label="Upload background image"
+            >
+            <div class="toolbar-background-actions">
+              <button type="button" data-board-control="background-upload">Upload</button>
+              <button type="button" data-board-control="background-capture">Capture</button>
+              <button type="button" data-board-control="background-remove">Remove</button>
+            </div>
+            <span class="background-status" data-board-background-status aria-live="polite"></span>
+          </div>
         </div>
 
         <div class="toolbar-bottom">

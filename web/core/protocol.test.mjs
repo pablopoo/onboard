@@ -76,6 +76,29 @@ test("validateBoardEvent accepts board:set-surface and stroke:expire", () => {
   );
 });
 
+test("validateBoardEvent accepts board:set-background with image or null", () => {
+  assert.deepEqual(
+    validateBoardEvent(
+      createBoardEvent("board:set-background", {
+        background: {
+          kind: "image",
+          dataUrl: "data:image/jpeg;base64,abc123",
+          width: 1280,
+          height: 720,
+        },
+      }),
+    ),
+    { valid: true },
+  );
+
+  assert.deepEqual(
+    validateBoardEvent(
+      createBoardEvent("board:set-background", { background: null }),
+    ),
+    { valid: true },
+  );
+});
+
 test("validateBoardEvent accepts board:undo with a stroke ID", () => {
   assert.deepEqual(
     validateBoardEvent(createBoardEvent("board:undo", { strokeId: "s1" })),
@@ -86,6 +109,12 @@ test("validateBoardEvent accepts board:undo with a stroke ID", () => {
 test("validateBoardEvent accepts board:restore with a board snapshot payload", () => {
   const event = createBoardEvent("board:restore", {
     surface: "blackboard",
+    background: {
+      kind: "image",
+      dataUrl: "data:image/png;base64,restored",
+      width: 640,
+      height: 360,
+    },
     strokes: [
       {
         strokeId: "s1",
@@ -104,6 +133,25 @@ test("validateBoardEvent accepts board:restore with a board snapshot payload", (
   });
 
   assert.deepEqual(validateBoardEvent(event), { valid: true });
+});
+
+test("board:set-background rejects malformed image payloads", () => {
+  for (const background of [
+    undefined,
+    {},
+    { kind: "video", dataUrl: "data:image/jpeg;base64,abc", width: 10, height: 10 },
+    { kind: "image", dataUrl: "https://example.test/image.jpg", width: 10, height: 10 },
+    { kind: "image", dataUrl: "data:text/plain;base64,abc", width: 10, height: 10 },
+    { kind: "image", dataUrl: "data:image/jpeg;base64,abc", width: 0, height: 10 },
+    { kind: "image", dataUrl: "data:image/jpeg;base64,abc", width: 10, height: Number.NaN },
+  ]) {
+    const result = validateBoardEvent(
+      makeEvent("board:set-background", { background }),
+    );
+
+    assert.equal(result.valid, false);
+    assert.match(result.reason, /background|image|dataUrl|width|height/i);
+  }
 });
 
 test("validateBoardEvent accepts an ephemeral stroke:start with expiresAt", () => {
@@ -412,6 +460,7 @@ test("board:restore rejects malformed snapshot payloads", () => {
   for (const payload of [
     {},
     { surface: "glassboard", strokes: [], pointer: { visible: false, point: null } },
+    { surface: "whiteboard", background: { kind: "image" }, strokes: [], pointer: { visible: false, point: null } },
     { surface: "whiteboard", strokes: {}, pointer: { visible: false, point: null } },
     { surface: "whiteboard", strokes: [validStroke], pointer: null },
     { surface: "whiteboard", strokes: [validStroke], pointer: { visible: "no", point: null } },
@@ -422,7 +471,7 @@ test("board:restore rejects malformed snapshot payloads", () => {
   ]) {
     const result = validateBoardEvent(makeEvent("board:restore", payload));
     assert.equal(result.valid, false);
-    assert.match(result.reason, /surface|strokes|stroke|pointer|point|tool|complete/i);
+    assert.match(result.reason, /surface|background|strokes|stroke|pointer|point|tool|complete/i);
   }
 });
 

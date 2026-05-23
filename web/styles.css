@@ -712,8 +712,21 @@ body {
   gap: 0.35rem;
 }
 
+.toolbar-background-panel {
+  display: grid;
+  gap: 0.35rem;
+  padding-top: 0.15rem;
+}
+
+.toolbar-background-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.35rem;
+}
+
 .toolbar-more-actions a,
-.toolbar-more-actions button {
+.toolbar-more-actions button,
+.toolbar-background-actions button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -729,18 +742,28 @@ body {
 }
 
 .toolbar-more-actions a:hover,
-.toolbar-more-actions button:hover {
+.toolbar-more-actions button:hover,
+.toolbar-background-actions button:hover {
   border-color: #d1d5db;
   background: #f9fafb;
 }
 
 .toolbar-more-actions a[aria-disabled="true"],
-.toolbar-more-actions button:disabled {
+.toolbar-more-actions button:disabled,
+.toolbar-background-actions button:disabled {
   pointer-events: none;
   color: #94a3b8;
   background: #f8fafc;
   border-color: #e5e7eb;
   cursor: not-allowed;
+}
+
+.background-status {
+  min-height: 0.9rem;
+  color: #64748b;
+  font-size: 0.62rem;
+  font-weight: 720;
+  line-height: 1.2;
 }
 
 .sr-only {

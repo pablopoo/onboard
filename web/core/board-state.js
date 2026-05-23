@@ -5,6 +5,7 @@ const RECENT_EVENT_ID_LIMIT = 8192;
 export function createBoardState() {
   return {
     surface: "whiteboard",
+    background: null,
     strokes: [],
     activeStrokes: new Map(),
     appliedEventIds: new Set(),
@@ -28,6 +29,12 @@ export function applyBoardEvent(state, event) {
 
   if (event.type === "board:set-surface") {
     state.surface = payload.surface;
+    rememberAppliedEventId(state, event.id);
+    return state;
+  }
+
+  if (event.type === "board:set-background") {
+    state.background = copyBackground(payload.background);
     rememberAppliedEventId(state, event.id);
     return state;
   }
@@ -115,6 +122,7 @@ export function applyBoardEvent(state, event) {
 
   if (event.type === "board:restore") {
     state.surface = payload.surface;
+    state.background = copyBackground(payload.background ?? null);
     state.strokes = payload.strokes.map(copyRestoredStroke);
     rebuildActiveStrokes(state);
     state.pointer = copyRestoredPointer(payload.pointer);
@@ -123,6 +131,7 @@ export function applyBoardEvent(state, event) {
   }
 
   if (event.type === "board:clear") {
+    state.background = null;
     state.strokes = [];
     state.activeStrokes.clear();
     state.pointer = { visible: false, point: null };
@@ -179,8 +188,22 @@ function rememberAppliedEventId(state, id) {
 export function snapshotBoardState(state) {
   return {
     surface: state.surface,
+    background: copyBackground(state.background),
     strokes: state.strokes.map(copyStroke),
     pointer: copyPointer(state.pointer),
+  };
+}
+
+function copyBackground(background) {
+  if (background === null || background === undefined) {
+    return null;
+  }
+
+  return {
+    kind: background.kind,
+    dataUrl: background.dataUrl,
+    width: background.width,
+    height: background.height,
   };
 }
 

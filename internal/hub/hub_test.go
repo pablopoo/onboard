@@ -239,6 +239,52 @@ func TestRecordClearPreservesLatestSurfaceBaseline(t *testing.T) {
 	assertRestoreEvent(t, snapshot[0], "evt-5", "greenboard", nil)
 }
 
+func TestRecordBackgroundIsIncludedInRestoreSnapshot(t *testing.T) {
+	t.Parallel()
+
+	relay := hub.New()
+	background := hub.Event{
+		ID:      "evt-background",
+		Type:    "board:set-background",
+		BoardID: "board-1",
+		At:      100,
+		Payload: map[string]any{
+			"background": map[string]any{
+				"kind":    "image",
+				"dataUrl": "data:image/jpeg;base64,abc123",
+				"width":   float64(1280),
+				"height":  float64(720),
+			},
+		},
+	}
+
+	relay.Record(background)
+
+	snapshot := relay.Snapshot()
+	if len(snapshot) != 1 {
+		t.Fatalf("snapshot length = %d, want 1", len(snapshot))
+	}
+	got, ok := snapshot[0].Payload["background"].(map[string]any)
+	if !ok {
+		t.Fatalf("snapshot background = %#v, want object", snapshot[0].Payload["background"])
+	}
+	if got["dataUrl"] != "data:image/jpeg;base64,abc123" {
+		t.Fatalf("snapshot background dataUrl = %v, want captured data URL", got["dataUrl"])
+	}
+
+	relay.Record(hub.Event{
+		ID:      "evt-clear",
+		Type:    "board:clear",
+		BoardID: "board-1",
+		At:      200,
+		Payload: map[string]any{},
+	})
+	snapshot = relay.Snapshot()
+	if snapshot[0].Payload["background"] != nil {
+		t.Fatalf("snapshot background after clear = %#v, want nil", snapshot[0].Payload["background"])
+	}
+}
+
 func TestRecordRestoreResetsReplayBaseline(t *testing.T) {
 	t.Parallel()
 

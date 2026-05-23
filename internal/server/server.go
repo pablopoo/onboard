@@ -20,10 +20,12 @@ import (
 )
 
 const (
-	relayWriteTimeout   = 5 * time.Second
-	relayReadLimitBytes = 4 << 20
-	maxRelayStrokeWidth = 128
-	conflictCloseDelay  = 50 * time.Millisecond
+	relayWriteTimeout                = 5 * time.Second
+	relayReadLimitBytes              = 8 << 20
+	maxRelayStrokeWidth              = 128
+	maxRelayBackgroundDataURLLength  = 6_000_000
+	maxRelayBackgroundImageDimension = 8192
+	conflictCloseDelay               = 50 * time.Millisecond
 )
 
 var relaySurfaces = map[string]struct{}{
@@ -271,6 +273,8 @@ func validateRelayEvent(event hub.Event) bool {
 	switch event.Type {
 	case "board:set-surface":
 		return validateRelaySurfacePayload(event.Payload)
+	case "board:set-background":
+		return validateRelaySetBackgroundPayload(event.Payload)
 	case "stroke:start":
 		return validateRelayStrokeStartPayload(event.Payload)
 	case "stroke:point":
@@ -291,6 +295,42 @@ func validateRelayEvent(event hub.Event) bool {
 func validateRelaySurfacePayload(payload map[string]any) bool {
 	surface, ok := relayPayloadString(payload, "surface")
 	return ok && isRelaySurface(surface)
+}
+
+func validateRelaySetBackgroundPayload(payload map[string]any) bool {
+	background, exists := payload["background"]
+	if !exists {
+		return false
+	}
+	return validateRelayBackgroundSnapshot(background)
+}
+
+func validateRelayBackgroundSnapshot(background any) bool {
+	if background == nil {
+		return true
+	}
+
+	payload, ok := background.(map[string]any)
+	if !ok {
+		return false
+	}
+
+	kind, kindOK := relayPayloadString(payload, "kind")
+	dataURL, dataURLOK := relayPayloadString(payload, "dataUrl")
+	width, widthOK := relayPayloadNumber(payload, "width")
+	height, heightOK := relayPayloadNumber(payload, "height")
+
+	return kindOK &&
+		kind == "image" &&
+		dataURLOK &&
+		strings.HasPrefix(dataURL, "data:image/") &&
+		len(dataURL) <= maxRelayBackgroundDataURLLength &&
+		widthOK &&
+		width > 0 &&
+		width <= maxRelayBackgroundImageDimension &&
+		heightOK &&
+		height > 0 &&
+		height <= maxRelayBackgroundImageDimension
 }
 
 func validateRelayStrokeStartPayload(payload map[string]any) bool {
@@ -342,6 +382,11 @@ func validateRelayStrokeIDPayload(payload map[string]any) bool {
 func validateRelayRestorePayload(payload map[string]any) bool {
 	if !validateRelaySurfacePayload(payload) {
 		return false
+	}
+	if background, exists := payload["background"]; exists {
+		if !validateRelayBackgroundSnapshot(background) {
+			return false
+		}
 	}
 
 	strokes, ok := payload["strokes"].([]any)
