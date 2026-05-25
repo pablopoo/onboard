@@ -445,6 +445,7 @@ func TestRelayBroadcastsBackgroundEventToViewer(t *testing.T) {
 	defer closeWebSocket(t, sender)
 	receiver := dialRelay(t, testServer)
 	defer closeWebSocket(t, receiver)
+	waitForViewerPresence(t, sender, 1)
 
 	event := backgroundEvent("evt-background")
 	writeRelayEvent(t, sender, event)
@@ -564,6 +565,28 @@ func readRelayEvent(t *testing.T, conn *websocket.Conn) hub.Event {
 		t.Fatalf("unmarshal relay event: %v", err)
 	}
 	return event
+}
+
+func waitForViewerPresence(t *testing.T, conn *websocket.Conn, viewerCount float64) {
+	t.Helper()
+
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for viewerCount %v", viewerCount)
+		default:
+		}
+
+		event := readRelayEvent(t, conn)
+		if event.Type != "system:relay-presence" {
+			continue
+		}
+		got, ok := event.Payload["viewerCount"].(float64)
+		if ok && got == viewerCount {
+			return
+		}
+	}
 }
 
 func assertNoRelayMessage(t *testing.T, conn *websocket.Conn) {
