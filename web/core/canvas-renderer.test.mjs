@@ -21,6 +21,7 @@ function makeContext() {
     lineJoin: undefined,
     lineDash: [],
     globalAlpha: 1,
+    globalCompositeOperation: "source-over",
     calls,
     clearRect(...args) {
       calls.push({ name: "clearRect", args });
@@ -49,6 +50,7 @@ function makeContext() {
         lineJoin: this.lineJoin,
         lineDash: this.lineDash,
         globalAlpha: this.globalAlpha,
+        globalCompositeOperation: this.globalCompositeOperation,
       });
     },
     setLineDash(value) {
@@ -63,6 +65,7 @@ function makeContext() {
         name: "fill",
         fillStyle: this.fillStyle,
         globalAlpha: this.globalAlpha,
+        globalCompositeOperation: this.globalCompositeOperation,
       });
     },
     drawImage(...args) {
@@ -77,6 +80,7 @@ function makeContext() {
         lineJoin: this.lineJoin,
         lineDash: this.lineDash,
         globalAlpha: this.globalAlpha,
+        globalCompositeOperation: this.globalCompositeOperation,
       });
       calls.push({ name: "save" });
     },
@@ -476,6 +480,50 @@ test("renderBoardState uses current surface background for eraser after surface 
   const eraserStroke = findCalls(ctx, "stroke")[0];
 
   assert.equal(eraserStroke.strokeStyle, background);
+});
+
+test("renderBoardState erases ink over image backgrounds without painting the surface color", () => {
+  const ctx = makeCacheableContext();
+  const image = {
+    complete: true,
+    naturalWidth: 1280,
+    naturalHeight: 720,
+  };
+
+  renderBoardState(
+    ctx,
+    makeState({
+      background: {
+        kind: "image",
+        dataUrl: "data:image/jpeg;base64,erase-test",
+        width: 1280,
+        height: 720,
+      },
+      strokes: [
+        makeStroke({ strokeId: "marker_before_eraser" }),
+        makeStroke({
+          strokeId: "eraser_over_image",
+          tool: "eraser",
+          color: "#ff00ff",
+        }),
+      ],
+    }),
+    SIZE,
+    {
+      createImage() {
+        return image;
+      },
+    },
+  );
+
+  assert.equal(findCalls(ctx, "stroke").length, 0);
+  assert.equal(ctx.layerContexts.length, 1);
+
+  const layerStrokes = findCalls(ctx.layerContexts[0], "stroke");
+  assert.equal(layerStrokes.length, 2);
+  assert.equal(layerStrokes[0].globalCompositeOperation, "source-over");
+  assert.equal(layerStrokes[1].globalCompositeOperation, "destination-out");
+  assert.equal(findCalls(ctx, "drawImage").length, 2);
 });
 
 test("renderBoardState draws a one-point stroke as an explicit dot", () => {

@@ -68,6 +68,12 @@ func (h *Hub) Record(event Event) {
 
 	var dropped []*subscription
 	for subscriber := range h.subscribers {
+		if shouldDropSlowSubscriberForEvent(subscriber, stored) {
+			delete(h.subscribers, subscriber)
+			dropped = append(dropped, subscriber)
+			continue
+		}
+
 		select {
 		case subscriber.events <- cloneEvent(stored):
 		default:
@@ -81,6 +87,19 @@ func (h *Hub) Record(event Event) {
 	h.mu.Unlock()
 
 	closeSubscriptions(dropped)
+}
+
+func shouldDropSlowSubscriberForEvent(subscriber *subscription, event Event) bool {
+	return subscriber.role == RoleViewer &&
+		eventCarriesBackground(event) &&
+		len(subscriber.events) > 0
+}
+
+func eventCarriesBackground(event Event) bool {
+	if event.Type != "board:set-background" && event.Type != "board:restore" {
+		return false
+	}
+	return event.Payload["background"] != nil
 }
 
 func (h *Hub) rememberAppliedEventID(id string) {

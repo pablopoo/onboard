@@ -422,6 +422,41 @@ func TestFullSubscriberQueueDoesNotBlockRecordAndDropsSubscriber(t *testing.T) {
 	}
 }
 
+func TestSlowViewerDropsBeforeBufferingMultipleLargeBackgrounds(t *testing.T) {
+	t.Parallel()
+
+	relay := hub.New()
+	_, events, unsubscribe := relay.SubscribeWithSnapshotRole(hub.RoleViewer)
+	defer unsubscribe()
+
+	first := backgroundEvent("evt-background-1", "data:image/jpeg;base64,first")
+	second := backgroundEvent("evt-background-2", "data:image/jpeg;base64,second")
+
+	relay.Record(first)
+	relay.Record(second)
+
+	select {
+	case got, ok := <-events:
+		if !ok {
+			t.Fatal("slow viewer closed before receiving first background")
+		}
+		if !reflect.DeepEqual(got, first) {
+			t.Fatalf("first background event = %#v, want %#v", got, first)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first background event")
+	}
+
+	select {
+	case got, ok := <-events:
+		if ok {
+			t.Fatalf("slow viewer received second large background instead of being dropped: %#v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for slow viewer channel to close")
+	}
+}
+
 func TestPresenterLockAllowsOnlyOneActivePresenter(t *testing.T) {
 	t.Parallel()
 
@@ -579,6 +614,23 @@ func expireEvent(id string, strokeID string) hub.Event {
 		At:      100,
 		Payload: map[string]any{
 			"strokeId": strokeID,
+		},
+	}
+}
+
+func backgroundEvent(id string, dataURL string) hub.Event {
+	return hub.Event{
+		ID:      id,
+		Type:    "board:set-background",
+		BoardID: "board-1",
+		At:      100,
+		Payload: map[string]any{
+			"background": map[string]any{
+				"kind":    "image",
+				"dataUrl": dataURL,
+				"width":   float64(1280),
+				"height":  float64(720),
+			},
 		},
 	}
 }

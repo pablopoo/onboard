@@ -2,6 +2,7 @@ import {
   createBoardEvent,
   isToolAllowedForSurface,
   normalizePoint,
+  validateBoardEvent,
 } from "../core/protocol.js";
 import {
   applyBoardEvent,
@@ -689,6 +690,12 @@ export function createBoardController({
 
     const event = createBoardEvent(type, payload, boardId);
     event.id = nextBoardEventId();
+    const validation = validateBoardEvent(event);
+    if (!validation.valid) {
+      reportError(new Error(`Invalid board event: ${validation.reason}`));
+      return null;
+    }
+
     if (!deliverEvent(event)) {
       return null;
     }

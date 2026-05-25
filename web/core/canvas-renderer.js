@@ -11,6 +11,7 @@ const RENDER_CACHES = new WeakMap();
 const CHALK_PARTICLES_PER_STAMP = 9;
 const BACKGROUND_IMAGE_CACHE = new Map();
 const BACKGROUND_IMAGE_CACHE_LIMIT = 8;
+const INK_LAYER_CACHES = new WeakMap();
 
 export function boardViewportForSize(size, aspectRatio = DEFAULT_BOARD_ASPECT_RATIO) {
   const width = Math.max(0, size?.width ?? 0);
@@ -64,12 +65,23 @@ export function renderBoardState(ctx, state, size, options = {}) {
   ctx.fillRect(viewport.x, viewport.y, viewport.width, viewport.height);
   drawBackgroundImage(ctx, backgroundImage, state?.background, viewport);
 
-  for (const stroke of state?.strokes ?? []) {
-    if (isExpired(stroke, now)) {
-      continue;
-    }
+  if (backgroundImage) {
+    drawImageBackedStrokes(
+      ctx,
+      state?.strokes ?? [],
+      size,
+      viewport,
+      background,
+      now,
+    );
+  } else {
+    for (const stroke of state?.strokes ?? []) {
+      if (isExpired(stroke, now)) {
+        continue;
+      }
 
-    drawStroke(ctx, stroke, viewport, background);
+      drawStroke(ctx, stroke, viewport, background);
+    }
   }
 
   drawPointer(ctx, state?.pointer, viewport);
@@ -162,6 +174,71 @@ function drawBackgroundImage(ctx, image, background, viewport) {
     background?.height || image.naturalHeight,
   );
   ctx.drawImage(image, rect.x, rect.y, rect.width, rect.height);
+}
+
+function drawImageBackedStrokes(ctx, strokes, size, viewport, background, now) {
+  const layer = getInkLayer(ctx, size);
+  if (!layer) {
+    for (const stroke of strokes) {
+      if (!isExpired(stroke, now)) {
+        drawStroke(ctx, stroke, viewport, background);
+      }
+    }
+    return;
+  }
+
+  layer.ctx.clearRect(0, 0, size.width, size.height);
+  layer.ctx.save();
+  for (const stroke of strokes) {
+    if (isExpired(stroke, now)) {
+      continue;
+    }
+
+    if (stroke?.tool === "eraser") {
+      layer.ctx.save();
+      layer.ctx.globalCompositeOperation = "destination-out";
+      drawStroke(layer.ctx, stroke, viewport, background);
+      layer.ctx.restore();
+      continue;
+    }
+
+    drawStroke(layer.ctx, stroke, viewport, background);
+  }
+  layer.ctx.restore();
+
+  ctx.drawImage(layer.canvas, 0, 0);
+}
+
+function getInkLayer(ctx, size) {
+  if (typeof ctx.drawImage !== "function") {
+    return null;
+  }
+
+  let layer = INK_LAYER_CACHES.get(ctx);
+  if (!layer) {
+    const canvas = createLayerCanvas(ctx.canvas);
+    const layerContext = canvas?.getContext?.("2d");
+    if (!canvas || !layerContext) {
+      return null;
+    }
+
+    layer = {
+      canvas,
+      ctx: layerContext,
+      width: 0,
+      height: 0,
+    };
+    INK_LAYER_CACHES.set(ctx, layer);
+  }
+
+  if (layer.width !== size.width || layer.height !== size.height) {
+    layer.canvas.width = size.width;
+    layer.canvas.height = size.height;
+    layer.width = size.width;
+    layer.height = size.height;
+  }
+
+  return layer;
 }
 
 function containRect(viewport, sourceWidth, sourceHeight) {

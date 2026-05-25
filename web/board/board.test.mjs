@@ -1248,6 +1248,31 @@ test("background file input publishes a shared image background", async () => {
   assert.equal(elements.backgroundStatus.textContent, "Image set");
 });
 
+test("background file input rejects image snapshots outside the relay contract", async () => {
+  const file = { name: "huge-slide.png", type: "image/png" };
+  const { controller, elements, transport, errors } = createFixture({
+    readBackgroundFile() {
+      return Promise.resolve({
+        kind: "image",
+        dataUrl: "data:image/png;base64,uploaded",
+        width: 8193,
+        height: 768,
+      });
+    },
+  });
+
+  await controller.connect();
+  elements.backgroundFileInput.files = [file];
+  elements.backgroundFileInput.dispatch("change");
+  await flushAsyncWork();
+
+  assert.equal(transport.sent.length, 0);
+  assert.equal(controller.getSnapshot().background, null);
+  assert.equal(elements.backgroundStatus.textContent, "Image failed");
+  assert.equal(errors.length, 1);
+  assert.match(errors[0].message, /invalid board event/i);
+});
+
 test("pasting an image file publishes it as the shared background", async () => {
   const fakeWindow = createFakeWindow();
   const imageFile = { name: "clip.png", type: "image/png" };
