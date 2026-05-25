@@ -90,6 +90,8 @@ const FINAL_POINT_EPSILON = 0.000001;
 const BACKGROUND_MAX_WIDTH = 1920;
 const BACKGROUND_MAX_HEIGHT = 1080;
 const BACKGROUND_JPEG_QUALITY = 0.88;
+const DEFAULT_MAX_QUEUED_EVENT_BYTES = 8_000_000;
+const DEFAULT_MAX_UNDO_BYTES = 8_000_000;
 const SESSION_STATUS_LABELS = {
   "Relay connecting": "Connecting",
   "Relay connected": "Relay",
@@ -126,6 +128,8 @@ export function createBoardController({
   ResizeObserverImpl = globalThis.ResizeObserver,
   window = globalThis.window,
   maxQueuedEvents = 1_000,
+  maxQueuedEventBytes = DEFAULT_MAX_QUEUED_EVENT_BYTES,
+  maxUndoBytes = DEFAULT_MAX_UNDO_BYTES,
   manageSessionStatus = true,
   viewerURL = "/viewer",
   copyText = defaultCopyText,
@@ -179,7 +183,9 @@ export function createBoardController({
   let toolbarExpanded = !compactViewport;
   const eventSessionId = createEventSessionId();
   const queuedEvents = [];
+  let queuedEventBytes = 0;
   const undoStack = [];
+  let undoBytes = 0;
 
   const unsubscribe = transport.onEvent((event) => {
     if (event?.type === "system:presenter-conflict") {
@@ -228,7 +234,7 @@ export function createBoardController({
       cancelScheduledRender();
       connectionState = "closed";
       connectionPromise = null;
-      queuedEvents.length = 0;
+      clearQueuedEvents();
       setSessionStatus("Relay disconnected");
       transport.close();
     },
@@ -370,7 +376,7 @@ export function createBoardController({
 
     resetClearConfirmation();
     if (publish("board:clear", {})) {
-      undoStack.push({ type: "restore", snapshot });
+      pushUndoAction({ type: "restore", snapshot });
       clearExpirationTimers();
       updateControls();
     }
@@ -475,7 +481,7 @@ export function createBoardController({
       return;
     }
 
-    const action = undoStack.pop();
+    const action = popUndoAction();
     if (!action) {
       updateControls();
       return;
@@ -610,7 +616,7 @@ export function createBoardController({
     if (stroke.ephemeral) {
       scheduleExpiration(stroke.strokeId, stroke.expiresAt);
     } else {
-      undoStack.push({ type: "stroke", strokeId: stroke.strokeId });
+      pushUndoAction({ type: "stroke", strokeId: stroke.strokeId });
       updateControls();
     }
   }
@@ -725,7 +731,7 @@ export function createBoardController({
       return null;
     }
 
-    undoStack.push({ type: "restore", snapshot });
+    pushUndoAction({ type: "restore", snapshot });
     setBackgroundStatus(statusMessage);
     updateControls();
     return event;
@@ -895,28 +901,111 @@ export function createBoardController({
   }
 
   function enqueueEvent(event) {
-    if (queuedEvents.length >= maxQueuedEvents) {
+    const size = serializedSize(event);
+    const shouldReplaceBackground = event.type === "board:set-background";
+    const replaced = shouldReplaceBackground
+      ? queuedEventStats((queued) => queued.event.type === "board:set-background")
+      : { count: 0, bytes: 0 };
+    const nextEventCount = queuedEvents.length - replaced.count;
+    const nextEventBytes = queuedEventBytes - replaced.bytes;
+
+    if (nextEventCount >= maxQueuedEvents) {
+      reportQueueFull();
+      return false;
+    }
+    if (nextEventBytes + size > maxQueuedEventBytes) {
       reportQueueFull();
       return false;
     }
 
-    queuedEvents.push(event);
+    if (shouldReplaceBackground) {
+      removeQueuedEvents((queued) => queued.event.type === "board:set-background");
+    }
+    queuedEvents.push({ event, size });
+    queuedEventBytes += size;
     return true;
   }
 
   function flushQueuedEvents() {
     while (queuedEvents.length > 0 && connectionState === "open") {
-      const event = queuedEvents.shift();
+      const queued = queuedEvents.shift();
+      queuedEventBytes -= queued.size;
+      const event = queued.event;
 
       try {
         transport.send(event);
       } catch (error) {
-        queuedEvents.unshift(event);
+        queuedEvents.unshift(queued);
+        queuedEventBytes += queued.size;
         connectionState = "failed";
         connectionPromise = null;
         setSessionStatus("Input paused");
         reportError(error);
       }
+    }
+  }
+
+  function queuedEventStats(predicate) {
+    let count = 0;
+    let bytes = 0;
+    for (const queued of queuedEvents) {
+      if (!predicate(queued)) {
+        continue;
+      }
+
+      count += 1;
+      bytes += queued.size;
+    }
+    return { count, bytes };
+  }
+
+  function removeQueuedEvents(predicate) {
+    for (let index = queuedEvents.length - 1; index >= 0; index -= 1) {
+      const queued = queuedEvents[index];
+      if (!predicate(queued)) {
+        continue;
+      }
+
+      queuedEvents.splice(index, 1);
+      queuedEventBytes -= queued.size;
+    }
+  }
+
+  function clearQueuedEvents() {
+    queuedEvents.length = 0;
+    queuedEventBytes = 0;
+  }
+
+  function pushUndoAction(action) {
+    const size = serializedSize(action);
+    if (size > maxUndoBytes) {
+      return false;
+    }
+
+    undoStack.push({ action, size });
+    undoBytes += size;
+    while (undoBytes > maxUndoBytes && undoStack.length > 0) {
+      const dropped = undoStack.shift();
+      undoBytes -= dropped.size;
+    }
+    return true;
+  }
+
+  function popUndoAction() {
+    const entry = undoStack.pop();
+    if (!entry) {
+      return null;
+    }
+
+    undoBytes -= entry.size;
+    return entry.action;
+  }
+
+  function serializedSize(value) {
+    try {
+      return JSON.stringify(value).length;
+    } catch {
+      return Number.POSITIVE_INFINITY;
     }
   }
 
@@ -1311,7 +1400,7 @@ export function createBoardController({
     connectionState = "closed";
     connectionPromise = null;
     connectionGeneration += 1;
-    queuedEvents.length = 0;
+    clearQueuedEvents();
     transport.close();
     setText(elements.sessionStatus, "Presenter active elsewhere");
     updateControls();

@@ -421,6 +421,8 @@ function createFixture(options = {}) {
     window: options.window,
     ResizeObserverImpl: options.ResizeObserverImpl,
     maxQueuedEvents: options.maxQueuedEvents,
+    maxQueuedEventBytes: options.maxQueuedEventBytes,
+    maxUndoBytes: options.maxUndoBytes,
     manageSessionStatus: options.manageSessionStatus,
     viewerURL: options.viewerURL,
     copyText: options.copyText,
@@ -1356,6 +1358,155 @@ test("remove background publishes a null shared background", async () => {
   assert.equal(transport.sent.at(-1).type, "board:set-background");
   assert.deepEqual(transport.sent.at(-1).payload, { background: null });
   assert.equal(controller.getSnapshot().background, null);
+});
+
+test("offline background uploads keep only the latest queued background", async () => {
+  const transport = createFakeTransport({
+    deferConnect: true,
+    throwBeforeOpen: true,
+  });
+  const { controller, elements } = createFixture({
+    transport,
+    readBackgroundFile(file) {
+      return Promise.resolve({
+        kind: "image",
+        dataUrl: `data:image/jpeg;base64,${file.name}`,
+        width: 1280,
+        height: 720,
+      });
+    },
+  });
+
+  const connection = controller.connect();
+  elements.backgroundFileInput.files = [{ name: "first", type: "image/jpeg" }];
+  elements.backgroundFileInput.dispatch("change");
+  await flushAsyncWork();
+  elements.backgroundFileInput.files = [{ name: "second", type: "image/jpeg" }];
+  elements.backgroundFileInput.dispatch("change");
+  await flushAsyncWork();
+
+  assert.equal(
+    controller.getSnapshot().background.dataUrl,
+    "data:image/jpeg;base64,second",
+  );
+  assert.deepEqual(transport.sent, []);
+
+  transport.resolveConnect();
+  await connection;
+
+  const backgroundEvents = transport.sent.filter(
+    (event) => event.type === "board:set-background",
+  );
+  assert.equal(backgroundEvents.length, 1);
+  assert.equal(
+    backgroundEvents[0].payload.background.dataUrl,
+    "data:image/jpeg;base64,second",
+  );
+});
+
+test("offline background upload is rejected when it exceeds the queue byte budget", async () => {
+  const transport = createFakeTransport({
+    deferConnect: true,
+    throwBeforeOpen: true,
+  });
+  const { controller, elements, errors } = createFixture({
+    transport,
+    maxQueuedEventBytes: 120,
+    readBackgroundFile() {
+      return Promise.resolve({
+        kind: "image",
+        dataUrl: `data:image/jpeg;base64,${"a".repeat(256)}`,
+        width: 1280,
+        height: 720,
+      });
+    },
+  });
+
+  elements.backgroundFileInput.files = [
+    { name: "large.jpg", type: "image/jpeg" },
+  ];
+  elements.backgroundFileInput.dispatch("change");
+  await flushAsyncWork();
+
+  assert.equal(controller.getSnapshot().background, null);
+  assert.deepEqual(transport.sent, []);
+  assert.equal(elements.backgroundStatus.textContent, "Image failed");
+  assert.equal(errors.length, 1);
+  assert.match(errors[0].message, /queue is full/i);
+});
+
+test("oversized offline background keeps the previous queued background", async () => {
+  const transport = createFakeTransport({
+    deferConnect: true,
+    throwBeforeOpen: true,
+  });
+  const { controller, elements, errors } = createFixture({
+    transport,
+    maxQueuedEventBytes: 360,
+    readBackgroundFile(file) {
+      const body = file.name === "small" ? "small" : "a".repeat(256);
+      return Promise.resolve({
+        kind: "image",
+        dataUrl: `data:image/jpeg;base64,${body}`,
+        width: 1280,
+        height: 720,
+      });
+    },
+  });
+
+  const connection = controller.connect();
+  elements.backgroundFileInput.files = [{ name: "small", type: "image/jpeg" }];
+  elements.backgroundFileInput.dispatch("change");
+  await flushAsyncWork();
+  elements.backgroundFileInput.files = [{ name: "large", type: "image/jpeg" }];
+  elements.backgroundFileInput.dispatch("change");
+  await flushAsyncWork();
+
+  assert.equal(
+    controller.getSnapshot().background.dataUrl,
+    "data:image/jpeg;base64,small",
+  );
+  assert.equal(errors.length, 1);
+  assert.match(errors[0].message, /queue is full/i);
+
+  transport.resolveConnect();
+  await connection;
+
+  const backgroundEvents = transport.sent.filter(
+    (event) => event.type === "board:set-background",
+  );
+  assert.equal(backgroundEvents.length, 1);
+  assert.equal(
+    backgroundEvents[0].payload.background.dataUrl,
+    "data:image/jpeg;base64,small",
+  );
+});
+
+test("oversized background restore snapshots are not kept in undo history", async () => {
+  const { controller, elements, transport } = createFixture({
+    maxUndoBytes: 300,
+    readBackgroundFile(file) {
+      return Promise.resolve({
+        kind: "image",
+        dataUrl: `data:image/jpeg;base64,${file.name.repeat(128)}`,
+        width: 1280,
+        height: 720,
+      });
+    },
+  });
+
+  await controller.connect();
+  elements.backgroundFileInput.files = [{ name: "first", type: "image/jpeg" }];
+  elements.backgroundFileInput.dispatch("change");
+  await flushAsyncWork();
+  elements.backgroundFileInput.files = [{ name: "second", type: "image/jpeg" }];
+  elements.backgroundFileInput.dispatch("change");
+  await flushAsyncWork();
+
+  elements.undoButton.dispatch("click");
+
+  assert.equal(transport.sent.at(-1).type, "board:restore");
+  assert.equal(transport.sent.at(-1).payload.background, null);
 });
 
 test("mobile toolbar collapses by default and updates compact status", async () => {
