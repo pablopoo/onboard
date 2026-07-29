@@ -90,15 +90,22 @@ fi
 archive="$version.linux-$arch.tar.gz"
 url="https://go.dev/dl/$archive"
 tarball="$tmp_dir/$archive"
-checksum_file="$tmp_dir/$archive.sha256"
+metadata_file="$tmp_dir/downloads.json"
 
 echo "Downloading $url"
 fetch "$url" "$tarball"
-fetch "$url.sha256" "$checksum_file"
+fetch "https://go.dev/dl/?mode=json" "$metadata_file"
 
-checksum="$(tr -d '[:space:]' <"$checksum_file")"
+checksum="$(awk -v archive="$archive" '
+  index($0, "\"filename\": \"" archive "\"") { found = 1 }
+  found && index($0, "\"sha256\"") {
+    split($0, fields, "\"")
+    print fields[4]
+    exit
+  }
+' "$metadata_file")"
 if [[ ! "$checksum" =~ ^[0-9a-f]{64}$ ]]; then
-  echo "unexpected checksum response for $archive" >&2
+  echo "official download metadata has no valid checksum for $archive" >&2
   exit 1
 fi
 

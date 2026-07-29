@@ -45,6 +45,13 @@ checksum_file() {
   fi
 }
 
+write_metadata() {
+  local file="$1"
+  local checksum="$2"
+  printf '[{"version":"go1.26.5","files":[\n  {"filename": "go1.26.5.linux-amd64.tar.gz",\n   "sha256": "%s"}\n]}]\n' \
+    "$checksum" >"$file"
+}
+
 write_command_stubs() {
   local fixture_dir="$1"
   local bin_dir="$fixture_dir/bin"
@@ -69,7 +76,7 @@ while (($#)); do
 done
 case "$url" in
   *VERSION*) source_file="$FIXTURE_DIR/version.txt" ;;
-  *.sha256) source_file="$FIXTURE_DIR/archive.sha256" ;;
+  *mode=json*) source_file="$FIXTURE_DIR/downloads.json" ;;
   *) source_file="$FIXTURE_DIR/go1.26.5.linux-amd64.tar.gz" ;;
 esac
 cp "$source_file" "$output"
@@ -105,17 +112,19 @@ run_case() {
 
   case "$mode" in
     malformed-checksum)
-      printf 'not-a-checksum\n' >"$fixture_dir/archive.sha256"
+      write_metadata "$fixture_dir/downloads.json" "not-a-checksum"
       ;;
     mismatched-checksum)
-      printf '%064d\n' 0 >"$fixture_dir/archive.sha256"
+      write_metadata "$fixture_dir/downloads.json" "$(printf '%064d' 0)"
       ;;
     invalid-staged-go)
       archive_fixture "$fixture_dir" "go1.25.0"
-      checksum_file "$fixture_dir/go1.26.5.linux-amd64.tar.gz" >"$fixture_dir/archive.sha256"
+      write_metadata "$fixture_dir/downloads.json" \
+        "$(checksum_file "$fixture_dir/go1.26.5.linux-amd64.tar.gz")"
       ;;
     failed-final-move | success)
-      checksum_file "$fixture_dir/go1.26.5.linux-amd64.tar.gz" >"$fixture_dir/archive.sha256"
+      write_metadata "$fixture_dir/downloads.json" \
+        "$(checksum_file "$fixture_dir/go1.26.5.linux-amd64.tar.gz")"
       ;;
   esac
 
