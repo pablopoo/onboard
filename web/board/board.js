@@ -92,6 +92,8 @@ const BACKGROUND_MAX_HEIGHT = 1080;
 const BACKGROUND_JPEG_QUALITY = 0.88;
 const DEFAULT_MAX_QUEUED_EVENT_BYTES = 8_000_000;
 const DEFAULT_MAX_UNDO_BYTES = 8_000_000;
+const PRESENTER_CAPABILITY_KEY = "onboard.presenterCapability";
+const PRESENTER_CAPABILITY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const SESSION_STATUS_LABELS = {
   "Relay connecting": "Connecting",
   "Relay connected": "Relay",
@@ -100,12 +102,15 @@ const SESSION_STATUS_LABELS = {
   "Input paused": "Paused",
 };
 
-export function createRelayURL(location, role = "") {
+export function createRelayURL(location, role = "", presenterCapability = "") {
   const base = `${location.protocol}//${location.host}`;
   const url = new URL("/ws/relay", base);
   url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
   if (role) {
     url.searchParams.set("role", role);
+  }
+  if (presenterCapability) {
+    url.searchParams.set("presenter", presenterCapability);
   }
   return url.href;
 }
@@ -187,8 +192,12 @@ export function createBoardController({
   let undoBytes = 0;
 
   const unsubscribe = transport.onEvent((event) => {
+    if (event?.type === "system:presenter-unauthorized") {
+      lockPresenterControls("Presenter link required");
+      return;
+    }
     if (event?.type === "system:presenter-conflict") {
-      lockPresenterControls();
+      lockPresenterControls("Presenter active elsewhere");
       return;
     }
     if (event?.type === "system:relay-presence") {
@@ -1416,7 +1425,7 @@ export function createBoardController({
     ];
   }
 
-  function lockPresenterControls() {
+  function lockPresenterControls(message) {
     presenterLocked = true;
     activeStroke = null;
     activePointerId = null;
@@ -1425,7 +1434,7 @@ export function createBoardController({
     connectionGeneration += 1;
     clearQueuedEvents();
     transport.close();
-    setText(elements.sessionStatus, "Presenter active elsewhere");
+    setText(elements.sessionStatus, message);
     updateControls();
   }
 
@@ -1468,6 +1477,8 @@ export function createBoardApp({
   createRelayTransport = createWebSocketRelayTransport,
   copyText = defaultCopyText,
   reportError = defaultReportError,
+  storage = globalThis.localStorage,
+  history = globalThis.history,
 } = {}) {
   const root = document?.querySelector?.("#board-app");
   if (!root) {
@@ -1477,8 +1488,9 @@ export function createBoardApp({
   const sessionStatus = root.querySelector("[data-board-session]");
   setText(sessionStatus, "Relay");
 
+  const presenterCapability = loadPresenterCapability(location, storage, history);
   const transport = createRelayTransport({
-    url: createRelayURL(location, "board"),
+    url: createRelayURL(location, "board", presenterCapability),
     WebSocketImpl,
   });
   const controller = createBoardController({
@@ -1549,6 +1561,31 @@ export function createBoardApp({
   });
 
   return controller;
+}
+
+function loadPresenterCapability(location, storage, history) {
+  const fragment = new URLSearchParams(String(location?.hash ?? "").replace(/^#/, ""));
+  const supplied = fragment.get("presenter") ?? "";
+  if (PRESENTER_CAPABILITY_PATTERN.test(supplied)) {
+    try {
+      storage?.setItem?.(PRESENTER_CAPABILITY_KEY, supplied);
+    } catch {
+      // Storage can be unavailable in hardened browser modes.
+    }
+    history?.replaceState?.(
+      null,
+      "",
+      `${location?.pathname || "/board"}${location?.search || ""}`,
+    );
+    return supplied;
+  }
+
+  try {
+    const stored = storage?.getItem?.(PRESENTER_CAPABILITY_KEY) ?? "";
+    return PRESENTER_CAPABILITY_PATTERN.test(stored) ? stored : "";
+  } catch {
+    return "";
+  }
 }
 
 function defaultScreenCaptureSupported() {

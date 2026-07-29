@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
@@ -20,6 +22,10 @@ const (
 )
 
 func main() {
+	capability, err := presenterCapability(rand.Reader)
+	if err != nil {
+		log.Fatalf("generate presenter capability: %v", err)
+	}
 	addr, allowFallback := configuredListenAddr(os.Getenv("ONBOARD_ADDR"))
 	listener, err := listenForServing(addr, allowFallback, net.Listen, os.Stdout)
 	if err != nil {
@@ -29,11 +35,12 @@ func main() {
 	baseURL := localhostURL(listener.Addr().String())
 	baseURLs := localBaseURLs(listener.Addr().String())
 	handler := server.New(server.Config{
-		Mode:     "local",
-		Addr:     listener.Addr().String(),
-		BaseURLs: baseURLs,
+		Mode:                "local",
+		Addr:                listener.Addr().String(),
+		BaseURLs:            baseURLs,
+		PresenterCapability: capability,
 	})
-	writeStartupURLs(os.Stdout, baseURL, baseURLs)
+	writeStartupURLs(os.Stdout, baseURL, baseURLs, capability)
 
 	httpServer := &http.Server{Handler: handler}
 	if err := httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
@@ -113,9 +120,17 @@ func localBaseURLs(addr string) []string {
 	return baseURLs
 }
 
-func writeStartupURLs(w io.Writer, localBaseURL string, baseURLs []string) {
+func presenterCapability(reader io.Reader) (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := io.ReadFull(reader, bytes); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(bytes), nil
+}
+
+func writeStartupURLs(w io.Writer, localBaseURL string, baseURLs []string, capability string) {
 	fmt.Fprintf(w, "Local:  %s/\n", trimTrailingSlash(localBaseURL))
-	fmt.Fprintf(w, "Board:  %s\n", urlPath(localBaseURL, "/board"))
+	fmt.Fprintf(w, "Board:  %s#presenter=%s\n", urlPath(localBaseURL, "/board"), capability)
 	fmt.Fprintf(w, "Viewer: %s\n", urlPath(localBaseURL, "/viewer"))
 
 	headingPrinted := false
@@ -130,7 +145,7 @@ func writeStartupURLs(w io.Writer, localBaseURL string, baseURLs []string) {
 			headingPrinted = true
 		}
 
-		fmt.Fprintf(w, "LAN Board:  %s\n", urlPath(baseURL, "/board"))
+		fmt.Fprintf(w, "LAN Board:  %s#presenter=%s\n", urlPath(baseURL, "/board"), capability)
 		fmt.Fprintf(w, "LAN Viewer: %s\n", urlPath(baseURL, "/viewer"))
 	}
 }

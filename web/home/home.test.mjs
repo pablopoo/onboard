@@ -122,6 +122,54 @@ test("home app renders share URLs from the Go share endpoint contract", async ()
   assert.equal(lanRows[1].childrenList[1].value, "http://192.168.1.20:1234/viewer");
 });
 
+test("home stores presenter fragment and adds it only to Board links", async () => {
+  const capability = "A".repeat(43);
+  const { root, list } = createHomeRoot();
+  const stored = new Map();
+  const replacements = [];
+
+  await createHomeApp({
+    document: createFakeDocument(root),
+    location: {
+      origin: "http://localhost:1234",
+      hash: `#presenter=${capability}`,
+      pathname: "/",
+      search: "",
+    },
+    history: {
+      replaceState(...args) {
+        replacements.push(args);
+      },
+    },
+    storage: {
+      getItem(key) {
+        return stored.get(key) ?? null;
+      },
+      setItem(key, value) {
+        stored.set(key, value);
+      },
+    },
+    fetchImpl() {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          baseUrls: ["http://localhost:1234"],
+          paths: { board: "/board", viewer: "/viewer" },
+        }),
+      });
+    },
+  });
+
+  const rows = shareRowsForGroup(list.childrenList[0]);
+  assert.equal(stored.get("onboard.presenterCapability"), capability);
+  assert.deepEqual(replacements, [[null, "", "/"]]);
+  assert.equal(
+    rows[0].childrenList[1].value,
+    `http://localhost:1234/board#presenter=${capability}`,
+  );
+  assert.equal(rows[1].childrenList[1].value, "http://localhost:1234/viewer");
+});
+
 test("home app falls back to the current browser origin when share loading fails", async () => {
   const { root, list, status } = createHomeRoot();
 

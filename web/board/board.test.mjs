@@ -532,6 +532,51 @@ test("createRelayURL maps http and https locations to /ws/relay", () => {
   );
 });
 
+test("board stores presenter fragment and sends it only in the relay query", () => {
+  const capability = "B".repeat(43);
+  const root = createBoardAppRoot();
+  const relayTransport = createFakeTransport();
+  const relayCalls = [];
+  const stored = new Map();
+  const replacements = [];
+
+  const controller = createBoardApp({
+    document: createFakeDocument(root),
+    location: {
+      protocol: "http:",
+      host: "local.test:8080",
+      pathname: "/board",
+      search: "",
+      hash: `#presenter=${capability}`,
+    },
+    history: {
+      replaceState(...args) {
+        replacements.push(args);
+      },
+    },
+    storage: {
+      getItem(key) {
+        return stored.get(key) ?? null;
+      },
+      setItem(key, value) {
+        stored.set(key, value);
+      },
+    },
+    createRelayTransport(options) {
+      relayCalls.push(options);
+      return relayTransport;
+    },
+  });
+
+  assert.equal(stored.get("onboard.presenterCapability"), capability);
+  assert.deepEqual(replacements, [[null, "", "/board"]]);
+  assert.equal(
+    relayCalls[0].url,
+    `ws://local.test:8080/ws/relay?role=board&presenter=${capability}`,
+  );
+  controller.close();
+});
+
 test("board app defaults to relay transport", () => {
   const root = createBoardAppRoot();
   const relayTransport = createFakeTransport();
@@ -1787,6 +1832,21 @@ test("presenter conflict disables controls and prevents local publishing", async
   assert.deepEqual(transport.sent, []);
   assert.equal(controller.getSnapshot().surface, "whiteboard");
   assert.deepEqual(controller.getSnapshot().strokes, []);
+});
+
+test("presenter unauthorized locks controls with a required-link status", async () => {
+  const { controller, elements, transport } = createFixture();
+
+  await controller.connect();
+  transport.emit({
+    type: "system:presenter-unauthorized",
+    payload: { reason: "presenter-capability" },
+  });
+
+  assert.equal(elements.sessionStatus.textContent, "Presenter link required");
+  assert.equal(elements.surfaceSelect.disabled, true);
+  assert.equal(elements.clearButton.disabled, true);
+  assert.equal(transport.closed, true);
 });
 
 test("relay board status shows compact connecting and connected states", async () => {

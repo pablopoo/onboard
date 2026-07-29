@@ -5,9 +5,15 @@ const DEFAULT_SHARE_TARGETS = [
   { label: "Board", path: "/board" },
   { label: "Viewer", path: "/viewer" },
 ];
+const PRESENTER_CAPABILITY_KEY = "onboard.presenterCapability";
+const PRESENTER_CAPABILITY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
-function createShareURL(baseURL, path) {
-  return new URL(path, baseURL).href;
+function createShareURL(baseURL, path, presenterCapability = "") {
+  const url = new URL(path, baseURL);
+  if (presenterCapability) {
+    url.hash = `presenter=${presenterCapability}`;
+  }
+  return url.href;
 }
 
 async function loadShareConfig(location = globalThis.location, fetchImpl = globalThis.fetch) {
@@ -82,7 +88,11 @@ function renderShareList(document, container, bases, targets, options = {}) {
         createShareRow(
           document,
           target.label,
-          createShareURL(base.baseURL, target.path),
+          createShareURL(
+            base.baseURL,
+            target.path,
+            target.label === "Board" ? options.presenterCapability : "",
+          ),
           options,
         ),
       );
@@ -133,6 +143,8 @@ export async function createHomeApp({
   fetchImpl = globalThis.fetch,
   copyText: copyTextImpl = defaultCopyText,
   setTimeout: setTimer = globalThis.setTimeout?.bind(globalThis),
+  storage = globalThis.localStorage,
+  history = globalThis.history,
 } = {}) {
   const root = document?.querySelector?.("#home-app");
   if (!root) {
@@ -145,10 +157,12 @@ export async function createHomeApp({
     return null;
   }
 
+  const presenterCapability = loadPresenterCapability(location, storage, history);
   const { bases, targets } = await loadShareConfig(location, fetchImpl);
   renderShareList(document, list, bases, targets, {
     copyText: copyTextImpl,
     setTimeout: setTimer,
+    presenterCapability,
   });
   if (status) {
     status.textContent = bases.some((base) => isLANBaseURL(base.baseURL))
@@ -157,6 +171,31 @@ export async function createHomeApp({
   }
 
   return { bases, targets };
+}
+
+function loadPresenterCapability(location, storage, history) {
+  const fragment = new URLSearchParams(String(location?.hash ?? "").replace(/^#/, ""));
+  const supplied = fragment.get("presenter") ?? "";
+  if (PRESENTER_CAPABILITY_PATTERN.test(supplied)) {
+    try {
+      storage?.setItem?.(PRESENTER_CAPABILITY_KEY, supplied);
+    } catch {
+      // Storage can be unavailable in hardened browser modes.
+    }
+    history?.replaceState?.(
+      null,
+      "",
+      `${location?.pathname || "/"}${location?.search || ""}`,
+    );
+    return supplied;
+  }
+
+  try {
+    const stored = storage?.getItem?.(PRESENTER_CAPABILITY_KEY) ?? "";
+    return PRESENTER_CAPABILITY_PATTERN.test(stored) ? stored : "";
+  } catch {
+    return "";
+  }
 }
 
 function shareTargetsForPaths(paths) {

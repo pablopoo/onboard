@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -55,10 +56,11 @@ var relayChalkSurfaces = map[string]struct{}{
 }
 
 type Config struct {
-	Mode     string
-	Addr     string
-	BaseURLs []string
-	RelayHub *hub.Hub
+	Mode                string
+	Addr                string
+	BaseURLs            []string
+	RelayHub            *hub.Hub
+	PresenterCapability string
 }
 
 func New(config Config) http.Handler {
@@ -87,9 +89,18 @@ func New(config Config) http.Handler {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/api/share", shareEndpoint(config.BaseURLs))
-	mux.HandleFunc("/ws/relay", relayEndpoint(relay))
+	mux.HandleFunc("/ws/relay", relayEndpoint(relay, config.PresenterCapability))
 
-	return mux
+	return securityHeaders(mux)
+}
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'; object-src 'none'; base-uri 'self'")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func shareEndpoint(configBaseURLs []string) http.HandlerFunc {
@@ -133,7 +144,7 @@ func serveAsset(w http.ResponseWriter, r *http.Request, name string) {
 	_, _ = w.Write(content)
 }
 
-func relayEndpoint(relay *hub.Hub) http.HandlerFunc {
+func relayEndpoint(relay *hub.Hub, presenterCapability string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
@@ -145,6 +156,15 @@ func relayEndpoint(relay *hub.Hub) http.HandlerFunc {
 		role := relayRole(r)
 		presenter := role == hub.RoleBoard
 		if presenter {
+			if !presenterAuthorized(presenterCapability, r.URL.Query().Get("presenter")) {
+				_ = writeRelaySystemEvent(conn, relaySystemEvent{
+					Type:    "system:presenter-unauthorized",
+					Payload: map[string]any{"reason": "presenter-capability"},
+				})
+				time.Sleep(conflictCloseDelay)
+				_ = conn.Close(websocket.StatusPolicyViolation, "presenter capability required")
+				return
+			}
 			if !relay.AcquirePresenter() {
 				_ = writeRelaySystemEvent(conn, relaySystemEvent{
 					Type:    "system:presenter-conflict",
@@ -215,6 +235,16 @@ func relayEndpoint(relay *hub.Hub) http.HandlerFunc {
 		_ = conn.Close(websocket.StatusNormalClosure, "")
 		<-writerDone
 	}
+}
+
+func presenterAuthorized(expected string, supplied string) bool {
+	if expected == "" {
+		return true
+	}
+	if len(expected) != len(supplied) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(expected), []byte(supplied)) == 1
 }
 
 func relayRole(r *http.Request) string {

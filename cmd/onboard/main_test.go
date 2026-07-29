@@ -1,11 +1,24 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"net"
 	"strings"
 	"testing"
 )
+
+func TestPresenterCapabilityUsesRawBase64URL(t *testing.T) {
+	t.Parallel()
+
+	capability, err := presenterCapability(bytes.NewReader(make([]byte, 32)))
+	if err != nil {
+		t.Fatalf("presenterCapability: %v", err)
+	}
+	if capability != "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" {
+		t.Fatalf("capability = %q, want 43-character raw base64url", capability)
+	}
+}
 
 func TestLocalhostURLFormatsListenerAddresses(t *testing.T) {
 	t.Parallel()
@@ -114,20 +127,23 @@ func TestWriteStartupURLsPrintsDirectLANBoardAndViewerLinks(t *testing.T) {
 	writeStartupURLs(&output, "http://localhost:8080", []string{
 		"http://localhost:8080",
 		"http://192.168.1.20:8080",
-	})
+	}, "test-presenter-token")
 
 	got := output.String()
 	for _, want := range []string{
 		"Local:  http://localhost:8080/\n",
-		"Board:  http://localhost:8080/board\n",
+		"Board:  http://localhost:8080/board#presenter=test-presenter-token\n",
 		"Viewer: http://localhost:8080/viewer\n",
 		"Open from another device on the same Wi-Fi/LAN:\n",
-		"LAN Board:  http://192.168.1.20:8080/board\n",
+		"LAN Board:  http://192.168.1.20:8080/board#presenter=test-presenter-token\n",
 		"LAN Viewer: http://192.168.1.20:8080/viewer\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("startup output missing %q:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "viewer#presenter") || strings.Contains(got, "viewer?presenter") {
+		t.Fatalf("startup output leaked presenter token into Viewer URL:\n%s", got)
 	}
 	if strings.Contains(got, "LAN:    http://192.168.1.20:8080/") {
 		t.Fatalf("startup output kept ambiguous LAN home-only URL:\n%s", got)

@@ -57,6 +57,26 @@ func TestRoutesServeExpectedContent(t *testing.T) {
 	}
 }
 
+func TestBrowserRoutesSetSecurityHeaders(t *testing.T) {
+	t.Parallel()
+
+	handler := server.New(server.Config{Mode: "local"})
+	for _, path := range []string{"/", "/board", "/viewer"} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+
+		if got := recorder.Header().Get("Content-Security-Policy"); got != "frame-ancestors 'none'; object-src 'none'; base-uri 'self'" {
+			t.Fatalf("%s CSP = %q", path, got)
+		}
+		if got := recorder.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Fatalf("%s X-Content-Type-Options = %q", path, got)
+		}
+		if got := recorder.Header().Get("Referrer-Policy"); got != "no-referrer" {
+			t.Fatalf("%s Referrer-Policy = %q", path, got)
+		}
+	}
+}
+
 func TestServesPWAIconPNGs(t *testing.T) {
 	t.Parallel()
 
@@ -345,6 +365,52 @@ func TestRelayRejectsSecondBoardPresenter(t *testing.T) {
 	defer cancel()
 	if _, _, err := conflict.Read(ctx); err == nil {
 		t.Fatal("second board connection stayed open after presenter conflict")
+	}
+}
+
+func TestRelayAuthorizesPresenterCapabilityBeforeMutation(t *testing.T) {
+	t.Parallel()
+
+	const capability = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	relay := hub.New()
+	testServer := httptest.NewServer(server.New(server.Config{
+		Mode:                "local",
+		RelayHub:            relay,
+		PresenterCapability: capability,
+	}))
+	t.Cleanup(testServer.Close)
+
+	for _, path := range []string{
+		"/ws/relay?role=board",
+		"/ws/relay?role=board&presenter=wrong",
+	} {
+		conn := dialRelayPath(t, testServer, path)
+		if eventType := readRelayEventType(t, conn); eventType != "system:presenter-unauthorized" {
+			t.Fatalf("unauthorized frame type = %q, want system:presenter-unauthorized", eventType)
+		}
+		_ = conn.CloseNow()
+	}
+	if snapshot := relay.Snapshot(); len(snapshot) != 0 {
+		t.Fatalf("unauthorized connections mutated relay: %#v", snapshot)
+	}
+
+	presenter := dialRelayPath(t, testServer, "/ws/relay?role=board&presenter="+capability)
+	defer closeWebSocket(t, presenter)
+	waitForRelayReady(t, presenter)
+	writeRelayEvent(t, presenter, serverTestEvent("evt-authorized", "stroke:start"))
+
+	deadline := time.Now().Add(time.Second)
+	for len(relay.Snapshot()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if snapshot := relay.Snapshot(); len(snapshot) != 1 {
+		t.Fatalf("authorized presenter snapshot length = %d, want 1", len(snapshot))
+	}
+
+	conflict := dialRelayPath(t, testServer, "/ws/relay?role=board&presenter="+capability)
+	defer conflict.CloseNow()
+	if eventType := readRelayEventType(t, conflict); eventType != "system:presenter-conflict" {
+		t.Fatalf("conflict frame type = %q, want system:presenter-conflict", eventType)
 	}
 }
 
