@@ -65,6 +65,41 @@ func TestRecordIgnoresDuplicateEventIDs(t *testing.T) {
 	assertRestoreEvent(t, snapshot[0], "evt-1", "whiteboard", []string{"stroke-1"})
 }
 
+func TestRecordRejectsDuplicateStrokeIDs(t *testing.T) {
+	t.Parallel()
+
+	relay := hub.New()
+	if !relay.Record(strokeStartEvent("evt-1", "stroke-1")) {
+		t.Fatal("first stroke start rejected")
+	}
+	if !relay.Record(strokeEndEvent("evt-2", "stroke-1")) {
+		t.Fatal("stroke end rejected")
+	}
+	if relay.Record(strokeStartEvent("evt-3", "stroke-1")) {
+		t.Fatal("duplicate stroke ID accepted")
+	}
+
+	snapshot := relay.Snapshot()
+	assertRestoreEvent(t, snapshot[0], "evt-2", "whiteboard", []string{"stroke-1"})
+}
+
+func TestRecordRejectsPointBeyondPerStrokeBudget(t *testing.T) {
+	t.Parallel()
+
+	relay := hub.New()
+	if !relay.Record(strokeStartEvent("evt-start", "stroke-1")) {
+		t.Fatal("stroke start rejected")
+	}
+	for index := 1; index < 8192; index++ {
+		if !relay.Record(strokePointEvent("evt-point-"+strconv.Itoa(index), "stroke-1", 0.4, 0.5)) {
+			t.Fatalf("point %d rejected before limit", index+1)
+		}
+	}
+	if relay.Record(strokePointEvent("evt-point-overflow", "stroke-1", 0.6, 0.7)) {
+		t.Fatal("8,193rd point accepted")
+	}
+}
+
 func TestRecordIgnoresUnappliedEventsWithoutBurningID(t *testing.T) {
 	t.Parallel()
 

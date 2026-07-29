@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"sync"
 	"time"
 )
@@ -8,6 +9,10 @@ import (
 const (
 	subscriberBufferSize = 64
 	recentEventIDLimit   = 8192
+	maxStrokes           = 4096
+	maxPointsPerStroke   = 8192
+	maxTotalPoints       = 65536
+	maxStateBytes        = 7_500_000
 	RoleBoard            = "board"
 	RoleViewer           = "viewer"
 )
@@ -22,7 +27,8 @@ type Event struct {
 
 type Hub struct {
 	mu                  sync.Mutex
-	events              []Event
+	lastEvent           Event
+	hasState            bool
 	state               boardSnapshot
 	appliedEventIDs     map[string]struct{}
 	appliedEventIDOrder []string
@@ -45,7 +51,7 @@ func New() *Hub {
 	}
 }
 
-func (h *Hub) Record(event Event) {
+func (h *Hub) Record(event Event) bool {
 	stored := cloneEvent(event)
 
 	h.mu.Lock()
@@ -55,16 +61,17 @@ func (h *Hub) Record(event Event) {
 	if stored.ID != "" {
 		if _, exists := h.appliedEventIDs[stored.ID]; exists {
 			h.mu.Unlock()
-			return
+			return false
 		}
 	}
 
 	if !h.state.Apply(stored) {
 		h.mu.Unlock()
-		return
+		return false
 	}
 	h.rememberAppliedEventID(stored.ID)
-	h.events = []Event{h.state.RestoreEvent(stored)}
+	h.lastEvent = stored
+	h.hasState = true
 
 	var dropped []*subscription
 	for subscriber := range h.subscribers {
@@ -87,6 +94,7 @@ func (h *Hub) Record(event Event) {
 	h.mu.Unlock()
 
 	closeSubscriptions(dropped)
+	return true
 }
 
 func shouldDropSlowSubscriberForEvent(subscriber *subscription, event Event) bool {
@@ -129,11 +137,7 @@ func (h *Hub) Snapshot() []Event {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	snapshot := make([]Event, len(h.events))
-	for index, event := range h.events {
-		snapshot[index] = cloneEvent(event)
-	}
-	return snapshot
+	return h.snapshotLocked()
 }
 
 func (h *Hub) Subscribe() (<-chan Event, func()) {
@@ -152,7 +156,7 @@ func (h *Hub) SubscribeWithSnapshotRole(role string) ([]Event, <-chan Event, fun
 	}
 
 	h.mu.Lock()
-	snapshot := cloneEvents(h.events)
+	snapshot := h.snapshotLocked()
 	h.subscribers[subscriber] = struct{}{}
 	dropped := h.broadcastPresenceLocked()
 	h.mu.Unlock()
@@ -175,6 +179,13 @@ func (h *Hub) SubscribeWithSnapshotRole(role string) ([]Event, <-chan Event, fun
 	}
 
 	return snapshot, subscriber.events, unsubscribe
+}
+
+func (h *Hub) snapshotLocked() []Event {
+	if !h.hasState {
+		return nil
+	}
+	return []Event{h.state.RestoreEvent(h.lastEvent)}
 }
 
 func (h *Hub) broadcastPresenceLocked() []*subscription {
@@ -254,19 +265,25 @@ func cloneEvent(event Event) Event {
 }
 
 type boardSnapshot struct {
-	surface    string
-	background map[string]any
-	strokes    []map[string]any
-	active     map[string]int
-	pointer    map[string]any
+	surface       string
+	background    map[string]any
+	strokes       []map[string]any
+	active        map[string]int
+	pointer       map[string]any
+	strokeIDs     map[string]struct{}
+	strokeBytes   map[string]int
+	totalPoints   int
+	retainedBytes int
 }
 
 func newBoardSnapshot() boardSnapshot {
-	return boardSnapshot{
+	snapshot := boardSnapshot{
 		surface: "whiteboard",
 		active:  make(map[string]int),
 		pointer: hiddenPointer(),
 	}
+	snapshot.rebuildAccounting()
+	return snapshot
 }
 
 func (s *boardSnapshot) Apply(event Event) bool {
@@ -276,21 +293,36 @@ func (s *boardSnapshot) Apply(event Event) bool {
 	switch event.Type {
 	case "board:set-surface":
 		if surface, ok := payload["surface"].(string); ok && surface != "" {
+			retainedBytes := s.retainedBytes - jsonSize(s.surface) + jsonSize(surface)
+			if retainedBytes > maxStateBytes {
+				return false
+			}
 			s.surface = surface
+			s.retainedBytes = retainedBytes
 		}
 	case "board:set-background":
+		var background map[string]any
 		if payload["background"] == nil {
-			s.background = nil
-			break
+			background = nil
+		} else {
+			value, ok := payload["background"].(map[string]any)
+			if !ok {
+				return false
+			}
+			background = clonePayload(value)
 		}
-		background, ok := payload["background"].(map[string]any)
-		if !ok {
+		retainedBytes := s.retainedBytes - jsonSize(s.background) + jsonSize(background)
+		if retainedBytes > maxStateBytes {
 			return false
 		}
-		s.background = clonePayload(background)
+		s.background = background
+		s.retainedBytes = retainedBytes
 	case "stroke:start":
 		strokeID, ok := payloadString(payload, "strokeId")
-		if !ok {
+		if !ok || len(s.strokes) >= maxStrokes || s.totalPoints >= maxTotalPoints {
+			return false
+		}
+		if _, exists := s.strokeIDs[strokeID]; exists {
 			return false
 		}
 		stroke := map[string]any{
@@ -308,8 +340,20 @@ func (s *boardSnapshot) Apply(event Event) bool {
 		if value, ok := payload["expiresAt"]; ok {
 			stroke["expiresAt"] = cloneValue(value)
 		}
+		strokeByteLength := jsonSize(stroke)
+		retainedBytes := s.retainedBytes + strokeByteLength
+		if len(s.strokes) > 0 {
+			retainedBytes++
+		}
+		if retainedBytes > maxStateBytes {
+			return false
+		}
 		s.strokes = append(s.strokes, stroke)
-		s.rebuildActive()
+		s.active[strokeID] = len(s.strokes) - 1
+		s.strokeIDs[strokeID] = struct{}{}
+		s.strokeBytes[strokeID] = strokeByteLength
+		s.totalPoints++
+		s.retainedBytes = retainedBytes
 	case "stroke:point":
 		strokeID, ok := payloadString(payload, "strokeId")
 		if !ok {
@@ -320,7 +364,18 @@ func (s *boardSnapshot) Apply(event Event) bool {
 			return false
 		}
 		points, _ := s.strokes[index]["points"].([]any)
-		s.strokes[index]["points"] = append(points, cloneValue(payload["point"]))
+		if len(points) >= maxPointsPerStroke || s.totalPoints >= maxTotalPoints {
+			return false
+		}
+		point := cloneValue(payload["point"])
+		pointBytes := jsonSize(point) + 1
+		if s.retainedBytes+pointBytes > maxStateBytes {
+			return false
+		}
+		s.strokes[index]["points"] = append(points, point)
+		s.strokeBytes[strokeID] += pointBytes
+		s.totalPoints++
+		s.retainedBytes += pointBytes
 	case "stroke:end":
 		strokeID, ok := payloadString(payload, "strokeId")
 		if !ok {
@@ -330,7 +385,11 @@ func (s *boardSnapshot) Apply(event Event) bool {
 		if !ok || index < 0 || index >= len(s.strokes) {
 			return false
 		}
+		oldBytes := s.strokeBytes[strokeID]
 		s.strokes[index]["complete"] = true
+		newBytes := jsonSize(s.strokes[index])
+		s.strokeBytes[strokeID] = newBytes
+		s.retainedBytes += newBytes - oldBytes
 		delete(s.active, strokeID)
 	case "stroke:expire":
 		strokeID, ok := payloadString(payload, "strokeId")
@@ -349,19 +408,30 @@ func (s *boardSnapshot) Apply(event Event) bool {
 			return false
 		}
 	case "board:restore":
-		s.restore(payload)
+		if !s.restore(payload) {
+			return false
+		}
 	case "board:clear":
 		s.background = nil
 		s.strokes = nil
 		s.active = make(map[string]int)
 		s.pointer = hiddenPointer()
+		s.rebuildAccounting()
 	case "pointer:show", "pointer:move":
-		s.pointer = map[string]any{
+		pointer := map[string]any{
 			"visible": true,
 			"point":   cloneValue(payload["point"]),
 		}
+		retainedBytes := s.retainedBytes - jsonSize(s.pointer) + jsonSize(pointer)
+		if retainedBytes > maxStateBytes {
+			return false
+		}
+		s.pointer = pointer
+		s.retainedBytes = retainedBytes
 	case "pointer:hide":
-		s.pointer = hiddenPointer()
+		pointer := hiddenPointer()
+		s.retainedBytes = s.retainedBytes - jsonSize(s.pointer) + jsonSize(pointer)
+		s.pointer = pointer
 	default:
 		return false
 	}
@@ -375,14 +445,7 @@ func (s *boardSnapshot) RestoreEvent(source Event) Event {
 		Type:    "board:restore",
 		BoardID: source.BoardID,
 		At:      source.At,
-		Payload: map[string]any{
-			"surface":    s.surface,
-			"background": cloneOptionalPayload(s.background),
-			"strokes": s.currentStrokes(
-				float64(time.Now().UnixMilli()),
-			),
-			"pointer": clonePayload(s.pointer),
-		},
+		Payload: s.restorePayload(float64(time.Now().UnixMilli())),
 	}
 }
 
@@ -396,35 +459,47 @@ func (s *boardSnapshot) ensureDefaults() {
 	if s.pointer == nil {
 		s.pointer = hiddenPointer()
 	}
+	if s.strokeIDs == nil || s.strokeBytes == nil {
+		s.rebuildAccounting()
+	}
 }
 
-func (s *boardSnapshot) restore(payload map[string]any) {
+func (s *boardSnapshot) restore(payload map[string]any) bool {
+	candidate := newBoardSnapshot()
 	if surface, ok := payload["surface"].(string); ok && surface != "" {
-		s.surface = surface
+		candidate.surface = surface
 	} else {
-		s.surface = "whiteboard"
+		candidate.surface = "whiteboard"
 	}
 
-	s.strokes = nil
+	candidate.strokes = nil
 	for _, value := range sliceValues(payload["strokes"]) {
 		stroke, ok := value.(map[string]any)
 		if !ok {
-			continue
+			return false
 		}
-		s.strokes = append(s.strokes, clonePayload(stroke))
+		candidate.strokes = append(candidate.strokes, clonePayload(stroke))
+	}
+	if len(candidate.strokes) > maxStrokes {
+		return false
 	}
 
 	if pointer, ok := payload["pointer"].(map[string]any); ok {
-		s.pointer = clonePayload(pointer)
+		candidate.pointer = clonePayload(pointer)
 	} else {
-		s.pointer = hiddenPointer()
+		candidate.pointer = hiddenPointer()
 	}
 	if background, ok := payload["background"].(map[string]any); ok {
-		s.background = clonePayload(background)
+		candidate.background = clonePayload(background)
 	} else {
-		s.background = nil
+		candidate.background = nil
 	}
-	s.rebuildActive()
+	if !candidate.rebuildAccounting() {
+		return false
+	}
+	candidate.rebuildActive()
+	*s = candidate
+	return true
 }
 
 func (s *boardSnapshot) currentStrokes(nowMillis float64) []any {
@@ -441,11 +516,15 @@ func (s *boardSnapshot) currentStrokes(nowMillis float64) []any {
 func (s *boardSnapshot) removeStroke(strokeID string, ephemeralOnly bool) bool {
 	filtered := s.strokes[:0]
 	removed := false
+	removedPointCount := 0
 	for _, stroke := range s.strokes {
 		currentID, _ := stroke["strokeId"].(string)
 		ephemeral, _ := stroke["ephemeral"].(bool)
 		if currentID == strokeID && (!ephemeralOnly || ephemeral) {
 			removed = true
+			if points, ok := stroke["points"].([]any); ok {
+				removedPointCount = len(points)
+			}
 			continue
 		}
 		filtered = append(filtered, stroke)
@@ -453,9 +532,75 @@ func (s *boardSnapshot) removeStroke(strokeID string, ephemeralOnly bool) bool {
 	if !removed {
 		return false
 	}
+	removedStrokeBytes := s.strokeBytes[strokeID]
+	separatorBytes := 0
+	if len(s.strokes) > 1 {
+		separatorBytes = 1
+	}
 	s.strokes = filtered
+	delete(s.strokeIDs, strokeID)
+	delete(s.strokeBytes, strokeID)
+	s.totalPoints -= removedPointCount
+	s.retainedBytes -= removedStrokeBytes + separatorBytes
 	s.rebuildActive()
 	return true
+}
+
+func (s *boardSnapshot) rebuildAccounting() bool {
+	s.strokeIDs = make(map[string]struct{}, len(s.strokes))
+	s.strokeBytes = make(map[string]int, len(s.strokes))
+	s.totalPoints = 0
+	for _, stroke := range s.strokes {
+		strokeID, ok := payloadString(stroke, "strokeId")
+		if !ok {
+			return false
+		}
+		if _, exists := s.strokeIDs[strokeID]; exists {
+			return false
+		}
+		points, ok := stroke["points"].([]any)
+		if !ok || len(points) == 0 || len(points) > maxPointsPerStroke {
+			return false
+		}
+		s.totalPoints += len(points)
+		if s.totalPoints > maxTotalPoints {
+			return false
+		}
+		s.strokeIDs[strokeID] = struct{}{}
+		s.strokeBytes[strokeID] = jsonSize(stroke)
+	}
+	s.retainedBytes = jsonSize(map[string]any{
+		"surface":    s.surface,
+		"background": cloneOptionalPayload(s.background),
+		"strokes":    cloneStrokeValues(s.strokes),
+		"pointer":    clonePayload(s.pointer),
+	})
+	return s.retainedBytes <= maxStateBytes
+}
+
+func cloneStrokeValues(strokes []map[string]any) []any {
+	values := make([]any, len(strokes))
+	for index, stroke := range strokes {
+		values[index] = clonePayload(stroke)
+	}
+	return values
+}
+
+func (s *boardSnapshot) restorePayload(nowMillis float64) map[string]any {
+	return map[string]any{
+		"surface":    s.surface,
+		"background": cloneOptionalPayload(s.background),
+		"strokes":    s.currentStrokes(nowMillis),
+		"pointer":    clonePayload(s.pointer),
+	}
+}
+
+func jsonSize(value any) int {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return maxStateBytes + 1
+	}
+	return len(data)
 }
 
 func (s *boardSnapshot) rebuildActive() {

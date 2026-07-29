@@ -25,6 +25,15 @@ const (
 	maxRelayStrokeWidth              = 128
 	maxRelayBackgroundDataURLLength  = 6_000_000
 	maxRelayBackgroundImageDimension = 8192
+	maxRelayEventIDBytes             = 128
+	maxRelayBoardIDBytes             = 64
+	maxRelayStrokeIDBytes            = 128
+	maxRelayColorBytes               = 64
+	maxRelayStrokes                  = 4_096
+	maxRelayPointsPerStroke          = 8_192
+	maxRelayTotalPoints              = 65_536
+	maxRelayStateBytes               = 7_500_000
+	maxRelayEphemeralLifetimeMillis  = 60_000
 	conflictCloseDelay               = 50 * time.Millisecond
 )
 
@@ -236,7 +245,7 @@ func parseRelayEvent(data []byte) (hub.Event, bool) {
 	}
 
 	id, ok := decodeRequiredString(fields["id"])
-	if !ok {
+	if !ok || len(id) > maxRelayEventIDBytes {
 		return hub.Event{}, false
 	}
 	eventType, ok := decodeRequiredString(fields["type"])
@@ -244,7 +253,7 @@ func parseRelayEvent(data []byte) (hub.Event, bool) {
 		return hub.Event{}, false
 	}
 	boardID, ok := decodeRequiredString(fields["boardId"])
-	if !ok {
+	if !ok || len(boardID) > maxRelayBoardIDBytes {
 		return hub.Event{}, false
 	}
 	at, ok := decodeRequiredNumber(fields["at"])
@@ -276,13 +285,13 @@ func validateRelayEvent(event hub.Event) bool {
 	case "board:set-background":
 		return validateRelaySetBackgroundPayload(event.Payload)
 	case "stroke:start":
-		return validateRelayStrokeStartPayload(event.Payload)
+		return validateRelayStrokeStartPayload(event.Payload, event.At)
 	case "stroke:point":
 		return validateRelayStrokePointPayload(event.Payload)
 	case "stroke:end", "stroke:expire", "board:undo":
 		return validateRelayStrokeIDPayload(event.Payload)
 	case "board:restore":
-		return validateRelayRestorePayload(event.Payload)
+		return validateRelayRestorePayload(event.Payload, event.At)
 	case "pointer:show", "pointer:move":
 		return validateRelayPointPayload(event.Payload)
 	case "pointer:hide", "board:clear":
@@ -323,7 +332,7 @@ func validateRelayBackgroundSnapshot(background any) bool {
 	return kindOK &&
 		kind == "image" &&
 		dataURLOK &&
-		strings.HasPrefix(dataURL, "data:image/") &&
+		strings.HasPrefix(dataURL, "data:image/jpeg;base64,") &&
 		len(dataURL) <= maxRelayBackgroundDataURLLength &&
 		widthOK &&
 		width > 0 &&
@@ -333,7 +342,7 @@ func validateRelayBackgroundSnapshot(background any) bool {
 		height <= maxRelayBackgroundImageDimension
 }
 
-func validateRelayStrokeStartPayload(payload map[string]any) bool {
+func validateRelayStrokeStartPayload(payload map[string]any, eventAt float64) bool {
 	strokeIDOK := validateRelayStrokeIDPayload(payload)
 	surface, surfaceOK := relayPayloadString(payload, "surface")
 	tool, toolOK := relayPayloadString(payload, "tool")
@@ -346,6 +355,7 @@ func validateRelayStrokeStartPayload(payload map[string]any) bool {
 		!isRelayToolAllowedForSurface(tool, surface) ||
 		!colorOK ||
 		strings.TrimSpace(color) == "" ||
+		len(color) > maxRelayColorBytes ||
 		!widthOK ||
 		width <= 0 ||
 		width > maxRelayStrokeWidth ||
@@ -361,8 +371,8 @@ func validateRelayStrokeStartPayload(payload map[string]any) bool {
 	}
 	_, hasExpiresAt := payload["expiresAt"]
 	if ephemeral == true {
-		_, ok := relayPayloadNumber(payload, "expiresAt")
-		return ok
+		expiresAt, ok := relayPayloadNumber(payload, "expiresAt")
+		return ok && expiresAt <= eventAt+maxRelayEphemeralLifetimeMillis
 	}
 	if hasExpiresAt {
 		return false
@@ -375,12 +385,16 @@ func validateRelayStrokePointPayload(payload map[string]any) bool {
 }
 
 func validateRelayStrokeIDPayload(payload map[string]any) bool {
-	_, ok := relayPayloadString(payload, "strokeId")
-	return ok
+	strokeID, ok := relayPayloadString(payload, "strokeId")
+	return ok && len(strokeID) <= maxRelayStrokeIDBytes
 }
 
-func validateRelayRestorePayload(payload map[string]any) bool {
+func validateRelayRestorePayload(payload map[string]any, eventAt float64) bool {
 	if !validateRelaySurfacePayload(payload) {
+		return false
+	}
+	serialized, err := json.Marshal(payload)
+	if err != nil || len(serialized) > maxRelayStateBytes {
 		return false
 	}
 	if background, exists := payload["background"]; exists {
@@ -390,12 +404,24 @@ func validateRelayRestorePayload(payload map[string]any) bool {
 	}
 
 	strokes, ok := payload["strokes"].([]any)
-	if !ok {
+	if !ok || len(strokes) > maxRelayStrokes {
 		return false
 	}
+	strokeIDs := make(map[string]struct{}, len(strokes))
+	totalPoints := 0
 	for _, value := range strokes {
 		stroke, ok := value.(map[string]any)
-		if !ok || !validateRelayRestoredStroke(stroke) {
+		if !ok || !validateRelayRestoredStroke(stroke, eventAt) {
+			return false
+		}
+		strokeID, _ := relayPayloadString(stroke, "strokeId")
+		if _, exists := strokeIDs[strokeID]; exists {
+			return false
+		}
+		strokeIDs[strokeID] = struct{}{}
+		points := stroke["points"].([]any)
+		totalPoints += len(points)
+		if totalPoints > maxRelayTotalPoints {
 			return false
 		}
 	}
@@ -404,7 +430,7 @@ func validateRelayRestorePayload(payload map[string]any) bool {
 	return ok && validateRelayPointerSnapshot(pointer)
 }
 
-func validateRelayRestoredStroke(stroke map[string]any) bool {
+func validateRelayRestoredStroke(stroke map[string]any, eventAt float64) bool {
 	strokeIDOK := validateRelayStrokeIDPayload(stroke)
 	surface, surfaceOK := relayPayloadString(stroke, "surface")
 	tool, toolOK := relayPayloadString(stroke, "tool")
@@ -419,11 +445,13 @@ func validateRelayRestoredStroke(stroke map[string]any) bool {
 		!isRelayToolAllowedForSurface(tool, surface) ||
 		!colorOK ||
 		strings.TrimSpace(color) == "" ||
+		len(color) > maxRelayColorBytes ||
 		!widthOK ||
 		width <= 0 ||
 		width > maxRelayStrokeWidth ||
 		!pointsOK ||
 		len(points) == 0 ||
+		len(points) > maxRelayPointsPerStroke ||
 		!completeOK {
 		return false
 	}
@@ -442,8 +470,8 @@ func validateRelayRestoredStroke(stroke map[string]any) bool {
 	}
 	_, hasExpiresAt := stroke["expiresAt"]
 	if ephemeral == true {
-		_, ok := relayPayloadNumber(stroke, "expiresAt")
-		return ok
+		expiresAt, ok := relayPayloadNumber(stroke, "expiresAt")
+		return ok && expiresAt <= eventAt+maxRelayEphemeralLifetimeMillis
 	}
 	if hasExpiresAt {
 		return false
