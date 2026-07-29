@@ -303,6 +303,37 @@ test("renderBoardState draws a completed marker stroke using normalized points i
   assert.equal(stroke.globalAlpha, 1);
 });
 
+test("renderBoardState scales marker eraser chalk and pointer dimensions by DPR", () => {
+  for (const tool of ["marker", "eraser", "chalk"]) {
+    const surface = tool === "chalk" ? "blackboard" : "whiteboard";
+    const one = makeContext();
+    const two = makeContext();
+    const state = makeState({
+      surface,
+      strokes: [makeStroke({ surface, tool, complete: false })],
+    });
+
+    renderBoardState(one, state, SIZE, { pixelRatio: 1 });
+    renderBoardState(two, state, { width: 400, height: 200 }, { pixelRatio: 2 });
+
+    assertNearlyEqual(
+      findCalls(two, "stroke")[0].lineWidth,
+      findCalls(one, "stroke")[0].lineWidth * 2,
+    );
+    assertNearlyEqual(
+      findCalls(two, "moveTo")[0].args[0],
+      findCalls(one, "moveTo")[0].args[0] * 2,
+    );
+  }
+
+  const one = makeContext();
+  const two = makeContext();
+  const state = makeState({ pointer: { visible: true, point: { x: 0.5, y: 0.5 } } });
+  renderBoardState(one, state, SIZE, { pixelRatio: 1 });
+  renderBoardState(two, state, { width: 400, height: 200 }, { pixelRatio: 2 });
+  assertNearlyEqual(findCalls(two, "arc").at(-1).args[2], findCalls(one, "arc").at(-1).args[2] * 2);
+});
+
 test("renderBoardState caches completed non-ephemeral strokes between renders", () => {
   const ctx = makeCacheableContext();
   const completedStroke = makeStroke({ strokeId: "completed_1" });

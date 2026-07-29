@@ -50,12 +50,17 @@ export function renderBoardState(ctx, state, size, options = {}) {
   const surface = surfaceName(state?.surface);
   const background = surfaceBackground(surface);
   const now = Number.isFinite(options.now) ? options.now : Date.now();
+  const pixelRatio = Number.isFinite(options.pixelRatio) && options.pixelRatio > 0
+    ? options.pixelRatio
+    : 1;
   const viewport = boardViewportForSize(size, options.aspectRatio);
   const backgroundImage = backgroundImageForState(state, options);
-  const cache = backgroundImage ? null : getRenderCache(ctx, size, surface);
+  const cache = backgroundImage
+    ? null
+    : getRenderCache(ctx, size, surface, pixelRatio);
 
   if (cache) {
-    renderBoardStateWithCache(ctx, cache, state, size, viewport, background, now);
+    renderBoardStateWithCache(ctx, cache, state, size, viewport, background, now, pixelRatio);
     return;
   }
 
@@ -73,6 +78,7 @@ export function renderBoardState(ctx, state, size, options = {}) {
       viewport,
       background,
       now,
+      pixelRatio,
     );
   } else {
     for (const stroke of state?.strokes ?? []) {
@@ -80,11 +86,11 @@ export function renderBoardState(ctx, state, size, options = {}) {
         continue;
       }
 
-      drawStroke(ctx, stroke, viewport, background);
+      drawStroke(ctx, stroke, viewport, background, pixelRatio);
     }
   }
 
-  drawPointer(ctx, state?.pointer, viewport);
+  drawPointer(ctx, state?.pointer, viewport, pixelRatio);
   ctx.restore();
 }
 
@@ -176,12 +182,12 @@ function drawBackgroundImage(ctx, image, background, viewport) {
   ctx.drawImage(image, rect.x, rect.y, rect.width, rect.height);
 }
 
-function drawImageBackedStrokes(ctx, strokes, size, viewport, background, now) {
+function drawImageBackedStrokes(ctx, strokes, size, viewport, background, now, pixelRatio) {
   const layer = getInkLayer(ctx, size);
   if (!layer) {
     for (const stroke of strokes) {
       if (!isExpired(stroke, now)) {
-        drawStroke(ctx, stroke, viewport, background);
+        drawStroke(ctx, stroke, viewport, background, pixelRatio);
       }
     }
     return;
@@ -197,12 +203,12 @@ function drawImageBackedStrokes(ctx, strokes, size, viewport, background, now) {
     if (stroke?.tool === "eraser") {
       layer.ctx.save();
       layer.ctx.globalCompositeOperation = "destination-out";
-      drawStroke(layer.ctx, stroke, viewport, background);
+      drawStroke(layer.ctx, stroke, viewport, background, pixelRatio);
       layer.ctx.restore();
       continue;
     }
 
-    drawStroke(layer.ctx, stroke, viewport, background);
+    drawStroke(layer.ctx, stroke, viewport, background, pixelRatio);
   }
   layer.ctx.restore();
 
@@ -267,7 +273,7 @@ function containRect(viewport, sourceWidth, sourceHeight) {
   };
 }
 
-function renderBoardStateWithCache(ctx, cache, state, size, viewport, background, now) {
+function renderBoardStateWithCache(ctx, cache, state, size, viewport, background, now, pixelRatio) {
   const cachedStrokeIds = updateStaticLayer(
     cache,
     state?.strokes ?? [],
@@ -275,6 +281,7 @@ function renderBoardStateWithCache(ctx, cache, state, size, viewport, background
     viewport,
     background,
     now,
+    pixelRatio,
   );
 
   ctx.clearRect(0, 0, size.width, size.height);
@@ -286,14 +293,14 @@ function renderBoardStateWithCache(ctx, cache, state, size, viewport, background
       continue;
     }
 
-    drawStroke(ctx, stroke, viewport, background);
+    drawStroke(ctx, stroke, viewport, background, pixelRatio);
   }
 
-  drawPointer(ctx, state?.pointer, viewport);
+  drawPointer(ctx, state?.pointer, viewport, pixelRatio);
   ctx.restore();
 }
 
-function updateStaticLayer(cache, strokes, size, viewport, background, now) {
+function updateStaticLayer(cache, strokes, size, viewport, background, now, pixelRatio) {
   const cacheableStrokes = strokes.filter((stroke) =>
     isCacheableStroke(stroke, now),
   );
@@ -311,7 +318,7 @@ function updateStaticLayer(cache, strokes, size, viewport, background, now) {
   }
 
   for (const stroke of cacheableStrokes.slice(startIndex)) {
-    drawStroke(cache.ctx, stroke, viewport, background);
+    drawStroke(cache.ctx, stroke, viewport, background, pixelRatio);
   }
 
   cache.cachedStrokeIds = cacheableIds;
@@ -319,7 +326,7 @@ function updateStaticLayer(cache, strokes, size, viewport, background, now) {
   return new Set(cacheableIds);
 }
 
-function getRenderCache(ctx, size, surface) {
+function getRenderCache(ctx, size, surface, pixelRatio) {
   if (typeof ctx.drawImage !== "function") {
     return null;
   }
@@ -337,6 +344,7 @@ function getRenderCache(ctx, size, surface) {
       canvas,
       ctx: layerContext,
       surface: null,
+      pixelRatio: 1,
       width: 0,
       height: 0,
       cachedStrokeIds: [],
@@ -348,13 +356,15 @@ function getRenderCache(ctx, size, surface) {
   if (
     cache.width !== size.width ||
     cache.height !== size.height ||
-    cache.surface !== surface
+    cache.surface !== surface ||
+    cache.pixelRatio !== pixelRatio
   ) {
     cache.canvas.width = size.width;
     cache.canvas.height = size.height;
     cache.width = size.width;
     cache.height = size.height;
     cache.surface = surface;
+    cache.pixelRatio = pixelRatio;
     cache.cachedStrokeIds = [];
     cache.valid = false;
   }
@@ -391,13 +401,14 @@ export function resizeCanvasToDisplaySize(
   return true;
 }
 
-function drawStroke(ctx, stroke, viewport, background) {
+function drawStroke(ctx, stroke, viewport, background, pixelRatio) {
   const points = stroke?.points ?? [];
   if (points.length === 0) {
     return;
   }
 
   const style = strokeStyle(stroke, background);
+  style.width *= pixelRatio;
 
   ctx.save();
   ctx.strokeStyle = style.color;
@@ -617,13 +628,16 @@ function normalizePressure(pressure) {
   return Number.isFinite(pressure) ? Math.max(0, Math.min(1, pressure)) : 0;
 }
 
-function drawPointer(ctx, pointer, viewport) {
+function drawPointer(ctx, pointer, viewport, pixelRatio) {
   if (pointer?.visible !== true || !pointer.point) {
     return;
   }
 
   const point = scalePoint(pointer.point, viewport);
-  const radius = Math.max(8, Math.min(viewport.width, viewport.height) * 0.025);
+  const radius = Math.max(
+    8 * pixelRatio,
+    Math.min(viewport.width, viewport.height) * 0.025,
+  );
 
   ctx.save();
   ctx.fillStyle = "rgba(245, 158, 11, 0.85)";

@@ -872,6 +872,17 @@ test("viewer passes current time to renderer so expired ephemeral strokes are hi
   assert.equal(latestRender(renders).snapshot.strokes[0].expiresAt, 1_000);
 });
 
+test("viewer passes backing-store pixel ratio to the renderer", async () => {
+  const { controller, elements, transport, renders } = await createFixture();
+  elements.canvas.width = 640;
+  elements.canvas.height = 360;
+
+  transport.emit(makeEvent("pointer:hide"));
+
+  assert.equal(latestRender(renders).options.pixelRatio, 2);
+  controller.close();
+});
+
 test("viewer rerenders when the next ephemeral stroke expires", async () => {
   const timers = createFakeTimers();
   let currentNow = 1_000;

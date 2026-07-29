@@ -179,7 +179,11 @@ export function createViewerController({
         width: canvas.width,
         height: canvas.height,
       },
-      { now: renderNow, onBackgroundLoad: scheduleRender },
+      {
+        now: renderNow,
+        onBackgroundLoad: scheduleRender,
+        pixelRatio: canvasPixelRatio(canvas),
+      },
     );
     scheduleNextEphemeralRender(snapshot, renderNow);
   }
@@ -311,6 +315,15 @@ export function createViewerController({
       }
     };
   }
+}
+
+function canvasPixelRatio(canvas) {
+  const width = canvas.getBoundingClientRect?.().width;
+  if (!Number.isFinite(width) || width <= 0) {
+    return 1;
+  }
+  const ratio = canvas.width / width;
+  return Number.isFinite(ratio) && ratio > 0 ? ratio : 1;
 }
 
 export function createViewerApp({

@@ -20,6 +20,7 @@ function createFakeElement(properties = {}) {
     classList: createFakeClassList(),
     dataset: {},
     style: createFakeStyle(),
+    focusCalls: 0,
     ...properties,
     addEventListener(type, listener) {
       if (!listeners.has(type)) {
@@ -59,6 +60,9 @@ function createFakeElement(properties = {}) {
     },
     removeAttribute(name) {
       this.attributes?.delete(name);
+    },
+    focus() {
+      this.focusCalls += 1;
     },
     dispatch(type, properties = {}) {
       const event = createFakeEvent(type, this, properties);
@@ -366,6 +370,7 @@ function createFixture(options = {}) {
   const transport = options.transport ?? createFakeTransport();
   const timers = createFakeTimers();
   const renders = [];
+  const renderOptions = [];
   const errors = [];
   const colorButtons = Array.from({ length: 4 }, (_value, index) =>
     createFakeElement({ dataset: { colorIndex: String(index) } }),
@@ -407,6 +412,7 @@ function createFixture(options = {}) {
     mobileFadeBadge: createFakeElement(),
     clearButton: createFakeElement(),
     sessionStatus: createFakeElement(),
+    toolbar: createFakeElement(),
   };
 
   const controller = createBoardController({
@@ -429,7 +435,10 @@ function createFixture(options = {}) {
     copyText: options.copyText,
     resizeCanvasToDisplaySize:
       options.resizeCanvasToDisplaySize ?? (() => false),
-    renderBoardState: (_ctx, snapshot) => renders.push(snapshot),
+    renderBoardState: (_ctx, snapshot, _size, options) => {
+      renders.push(snapshot);
+      renderOptions.push(options);
+    },
     readBackgroundFile:
       options.readBackgroundFile ??
       (() =>
@@ -456,7 +465,15 @@ function createFixture(options = {}) {
       }),
   });
 
-  return { controller, elements, transport, timers, renders, errors };
+  return {
+    controller,
+    elements,
+    transport,
+    timers,
+    renders,
+    renderOptions,
+    errors,
+  };
 }
 
 function createBoardAppRoot() {
@@ -468,6 +485,7 @@ function createBoardAppRoot() {
   );
   const children = new Map([
     ["[data-board-canvas]", createFakeCanvas()],
+    ["#presenter-toolbar", createFakeElement()],
     ["[data-board-control='surface']", createFakeElement({ value: "whiteboard" })],
     ["[data-board-control='pen']", createFakeElement()],
     ["[data-board-control='eraser']", createFakeElement()],
@@ -831,6 +849,18 @@ test("ResizeObserver resize rerenders the presenter board and is cleaned up", ()
   assert.equal(ResizeObserverImpl.instances[0].disconnected, true);
 });
 
+test("board passes backing-store pixel ratio to the renderer", () => {
+  const fakeWindow = createFakeWindow();
+  const { controller, elements, renderOptions } = createFixture({ window: fakeWindow });
+  elements.canvas.width = 400;
+  elements.canvas.height = 200;
+
+  fakeWindow.dispatch("resize");
+
+  assert.equal(renderOptions.at(-1).pixelRatio, 2);
+  controller.close();
+});
+
 test("window resize fallback rerenders the presenter board and is cleaned up", () => {
   const fakeWindow = createFakeWindow();
   const { controller, renders } = createFixture({
@@ -950,6 +980,66 @@ test("drawing gesture publishes coalesced pointer samples in order", async () =>
       { x: 0.10625, y: 0.2, pressure: 0.2 },
       { x: 0.275, y: 0.35, pressure: 0.5 },
     ],
+  );
+});
+
+test("second pointer cannot replace or finish the owned stroke", async () => {
+  const { controller, elements, transport } = createFixture();
+  await controller.connect();
+
+  elements.canvas.dispatch("pointerdown", {
+    clientX: 40,
+    clientY: 40,
+    pointerId: 1,
+  });
+  elements.canvas.dispatch("pointermove", {
+    clientX: 60,
+    clientY: 50,
+    pointerId: 1,
+  });
+  elements.canvas.dispatch("pointerdown", {
+    clientX: 180,
+    clientY: 100,
+    pointerId: 2,
+  });
+  elements.canvas.dispatch("pointermove", {
+    clientX: 190,
+    clientY: 110,
+    pointerId: 2,
+  });
+  elements.canvas.dispatch("pointerup", {
+    clientX: 190,
+    clientY: 110,
+    pointerId: 2,
+  });
+  elements.canvas.dispatch("pointerup", {
+    clientX: 80,
+    clientY: 60,
+    pointerId: 1,
+  });
+
+  assert.deepEqual(
+    transport.sent.map((event) => event.type),
+    ["stroke:start", "stroke:point", "stroke:point", "stroke:end"],
+  );
+  assert.equal(
+    new Set(transport.sent.filter((event) => event.payload.strokeId).map((event) => event.payload.strokeId)).size,
+    1,
+  );
+});
+
+test("lost pointer capture ends only the owned pointer lifecycle", async () => {
+  const { controller, elements, transport } = createFixture();
+  await controller.connect();
+
+  elements.canvas.dispatch("pointerdown", { pointerId: 1, clientX: 40, clientY: 40 });
+  elements.canvas.dispatch("lostpointercapture", { pointerId: 2 });
+  elements.canvas.dispatch("pointermove", { pointerId: 1, clientX: 60, clientY: 50 });
+  elements.canvas.dispatch("lostpointercapture", { pointerId: 1 });
+
+  assert.deepEqual(
+    transport.sent.map((event) => event.type),
+    ["stroke:start", "stroke:point", "stroke:end"],
   );
 });
 
@@ -1727,6 +1817,27 @@ test("mobile collapsed dock shows current ink color and fade state", async () =>
 
   assert.equal(elements.mobileFadeBadge.hidden, true);
   assert.equal(elements.mobileFadeBadge.attributes.get("aria-hidden"), "true");
+});
+
+test("collapsed toolbar is inert and returns focus to its toggle", () => {
+  const fakeWindow = createFakeWindow({ compactMobile: true });
+  const { elements } = createFixture({ window: fakeWindow });
+  const ownerDocument = { activeElement: null };
+  elements.toolbar.ownerDocument = ownerDocument;
+  elements.toolbar.contains = (element) => element === elements.penButton;
+
+  assert.equal(elements.toolbar.inert, true);
+  assert.equal(elements.toolbar.attributes.get("aria-hidden"), "true");
+
+  elements.toolbarToggleButton.dispatch("click");
+  assert.equal(elements.toolbar.inert, false);
+  assert.equal(elements.toolbar.attributes.get("aria-hidden"), "false");
+
+  ownerDocument.activeElement = elements.penButton;
+  elements.toolbarCloseButton.dispatch("click");
+  assert.equal(elements.toolbar.inert, true);
+  assert.equal(elements.toolbar.attributes.get("aria-hidden"), "true");
+  assert.equal(elements.toolbarToggleButton.focusCalls, 1);
 });
 
 test("mobile toolbar close control minimizes the expanded sheet", async () => {

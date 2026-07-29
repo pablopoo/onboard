@@ -186,6 +186,7 @@ export function createBoardController({
   let nextStrokeNumber = 1;
   let compactViewport = isCompactMobileViewport();
   let toolbarExpanded = !compactViewport;
+  let renderedToolbarExpanded = null;
   const queuedEvents = [];
   let queuedEventBytes = 0;
   const undoStack = [];
@@ -303,6 +304,7 @@ export function createBoardController({
     canvas.addEventListener("pointerup", handlePointerEnd);
     canvas.addEventListener("pointercancel", handlePointerEnd);
     canvas.addEventListener("pointerleave", handlePointerEnd);
+    canvas.addEventListener("lostpointercapture", handleLostPointerCapture);
   }
 
   function handleSurfaceChange(event) {
@@ -515,6 +517,9 @@ export function createBoardController({
     if (event.button !== undefined && event.button !== 0) {
       return;
     }
+    if (activeStroke || activePointerId !== null) {
+      return;
+    }
 
     event.preventDefault?.();
     resetClearConfirmation();
@@ -618,6 +623,28 @@ export function createBoardController({
     publishFinalPointIfChanged(stroke, pointFromEvent(event));
     activeStroke = null;
     canvas.releasePointerCapture?.(event.pointerId);
+    completeStroke(stroke);
+  }
+
+  function handleLostPointerCapture(event) {
+    if (mode === "pointer") {
+      if (activePointerId !== event.pointerId) {
+        return;
+      }
+      activePointerId = null;
+      publish("pointer:hide", {});
+      return;
+    }
+
+    if (!activeStroke || activeStroke.pointerId !== event.pointerId) {
+      return;
+    }
+    const stroke = activeStroke;
+    activeStroke = null;
+    completeStroke(stroke);
+  }
+
+  function completeStroke(stroke) {
     const endEvent = publish("stroke:end", { strokeId: stroke.strokeId });
     if (!endEvent) {
       updateControls();
@@ -1056,7 +1083,10 @@ export function createBoardController({
         width: canvas.width,
         height: canvas.height,
       },
-      { onBackgroundLoad: scheduleRender },
+      {
+        onBackgroundLoad: scheduleRender,
+        pixelRatio: canvasPixelRatio(canvas),
+      },
     );
   }
 
@@ -1228,6 +1258,10 @@ export function createBoardController({
   }
 
   function updateMobileToolbar() {
+    const focusWasInsideToolbar =
+      renderedToolbarExpanded === true &&
+      !toolbarExpanded &&
+      elements.toolbar?.contains?.(elements.toolbar.ownerDocument?.activeElement);
     const surfaceColor =
       SURFACE_COLORS[state.surface] ?? SURFACE_COLORS.whiteboard;
     elements.root?.style?.setProperty?.("--surface-color", surfaceColor);
@@ -1236,6 +1270,14 @@ export function createBoardController({
       "aria-expanded",
       String(toolbarExpanded),
     );
+    if (elements.toolbar) {
+      elements.toolbar.inert = !toolbarExpanded;
+      elements.toolbar.setAttribute?.("aria-hidden", String(!toolbarExpanded));
+    }
+    if (focusWasInsideToolbar) {
+      elements.toolbarToggleButton?.focus?.();
+    }
+    renderedToolbarExpanded = toolbarExpanded;
 
     const visibleMode = mode === "draw" ? "draw" : mode;
     for (const icon of elements.mobileToolIcons ?? []) {
@@ -1496,6 +1538,7 @@ export function createBoardApp({
   const controller = createBoardController({
     elements: {
       root,
+      toolbar: root.querySelector("#presenter-toolbar"),
       canvas: root.querySelector("[data-board-canvas]"),
       surfaceSelect: root.querySelector("[data-board-control='surface']"),
       penButton: root.querySelector("[data-board-control='pen']"),
@@ -1943,6 +1986,15 @@ function createEventSessionId() {
   }
 
   return Array.from(bytes, (value) => value.toString(36)).join("");
+}
+
+function canvasPixelRatio(canvas) {
+  const width = canvas.getBoundingClientRect?.().width;
+  if (!Number.isFinite(width) || width <= 0) {
+    return 1;
+  }
+  const ratio = canvas.width / width;
+  return Number.isFinite(ratio) && ratio > 0 ? ratio : 1;
 }
 
 if (typeof globalThis.document !== "undefined") {
