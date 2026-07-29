@@ -1,7 +1,9 @@
 # Reliability Hardening Design
 
-**Status:** Architecture approved; awaiting written-spec review  
-**Date:** 2026-07-29  
+**Status:** Approved for implementation planning
+
+**Date:** 2026-07-29
+
 **Target:** Onboard at revision `06edb074bff69a5211efc35db9a4d6b03cb8f5a0`
 
 ## Objective
