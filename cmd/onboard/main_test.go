@@ -99,7 +99,7 @@ func TestSelectLANIPv4AddressesPrefersPhysicalInterfacesOverVirtualBridges(t *te
 		{interfaceName: "enp5s0", address: "192.168.1.20"},
 		{interfaceName: "veth1234", address: "172.19.0.1"},
 	})
-	want := []string{"10.9.7.159", "192.168.1.20"}
+	want := []string{"192.168.1.20", "10.9.7.159"}
 
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("selected LAN addresses = %#v, want %#v", got, want)
@@ -113,7 +113,66 @@ func TestSelectLANIPv4AddressesFallsBackToOneVirtualBridgeAddress(t *testing.T) 
 		{interfaceName: "docker0", address: "172.17.0.1"},
 		{interfaceName: "br-8f1d", address: "172.18.0.1"},
 	})
-	want := []string{"172.17.0.1"}
+	want := []string{"172.18.0.1"}
+
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("selected LAN addresses = %#v, want %#v", got, want)
+	}
+}
+
+func TestSelectLANIPv4AddressesRanksPhysicalThenUnknownDeterministically(t *testing.T) {
+	t.Parallel()
+
+	candidates := []lanIPv4Candidate{
+		{interfaceName: "tailscale0", address: "100.64.0.2"},
+		{interfaceName: "mystery0", address: "192.168.50.9"},
+		{interfaceName: "eth0", address: "192.168.1.20"},
+		{interfaceName: "utun4", address: "10.8.0.4"},
+		{interfaceName: "wlan0", address: "10.9.7.159"},
+		{interfaceName: "docker0", address: "172.17.0.1"},
+		{interfaceName: "wg0", address: "10.7.0.2"},
+		{interfaceName: "tun0", address: "10.6.0.2"},
+		{interfaceName: "en0", address: "192.168.2.20"},
+	}
+	want := []string{"192.168.2.20", "192.168.1.20"}
+
+	for _, input := range [][]lanIPv4Candidate{
+		candidates,
+		{candidates[8], candidates[5], candidates[1], candidates[3], candidates[6], candidates[0], candidates[4], candidates[2], candidates[7]},
+	} {
+		got := selectLANIPv4Addresses(input)
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("selected LAN addresses = %#v, want %#v", got, want)
+		}
+	}
+}
+
+func TestSelectLANIPv4AddressesRanksUnknownAboveTunnelFallback(t *testing.T) {
+	t.Parallel()
+
+	got := selectLANIPv4Addresses([]lanIPv4Candidate{
+		{interfaceName: "wg0", address: "10.7.0.2"},
+		{interfaceName: "mystery0", address: "192.168.50.9"},
+		{interfaceName: "tailscale0", address: "100.64.0.2"},
+	})
+	want := []string{"192.168.50.9"}
+
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("selected LAN addresses = %#v, want %#v", got, want)
+	}
+}
+
+func TestSelectLANIPv4AddressesRanksTunnelFallbackDeterministically(t *testing.T) {
+	t.Parallel()
+
+	got := selectLANIPv4Addresses([]lanIPv4Candidate{
+		{interfaceName: "wg0", address: "10.7.0.2"},
+		{interfaceName: "utun4", address: "10.8.0.4"},
+		{interfaceName: "tailscale0", address: "100.64.0.2"},
+		{interfaceName: "tun0", address: "10.6.0.2"},
+		{interfaceName: "docker0", address: "172.17.0.1"},
+	})
+	want := []string{"100.64.0.2"}
 
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("selected LAN addresses = %#v, want %#v", got, want)

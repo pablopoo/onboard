@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 
 	"onboard/internal/server"
@@ -209,8 +210,14 @@ type lanIPv4Candidate struct {
 }
 
 func selectLANIPv4Addresses(candidates []lanIPv4Candidate) []string {
-	preferred := make([]string, 0, len(candidates))
-	virtualBridges := make([]string, 0, len(candidates))
+	type rankedCandidate struct {
+		interfaceName string
+		address       string
+		rank          int
+	}
+
+	preferred := make([]rankedCandidate, 0, len(candidates))
+	fallbacks := make([]rankedCandidate, 0, len(candidates))
 	seen := make(map[string]struct{}, len(candidates))
 
 	for _, candidate := range candidates {
@@ -225,17 +232,80 @@ func selectLANIPv4Addresses(candidates []lanIPv4Candidate) []string {
 		}
 		seen[address] = struct{}{}
 
-		if isLikelyVirtualBridgeInterface(candidate.interfaceName) {
-			virtualBridges = append(virtualBridges, address)
-			continue
+		name := strings.ToLower(strings.TrimSpace(candidate.interfaceName))
+		ranked := rankedCandidate{interfaceName: name, address: address}
+		switch {
+		case isLikelyPhysicalInterface(name):
+			ranked.rank = 0
+			preferred = append(preferred, ranked)
+		case isLikelyTunnelInterface(name):
+			ranked.rank = 2
+			fallbacks = append(fallbacks, ranked)
+		case isLikelyVirtualBridgeInterface(name):
+			ranked.rank = 3
+			fallbacks = append(fallbacks, ranked)
+		default:
+			ranked.rank = 1
+			preferred = append(preferred, ranked)
 		}
-		preferred = append(preferred, address)
+	}
+
+	sortRanked := func(values []rankedCandidate) {
+		sort.Slice(values, func(i, j int) bool {
+			if values[i].rank != values[j].rank {
+				return values[i].rank < values[j].rank
+			}
+			if values[i].interfaceName != values[j].interfaceName {
+				return values[i].interfaceName < values[j].interfaceName
+			}
+			return bytesCompareIPv4(values[i].address, values[j].address) < 0
+		})
+	}
+	addresses := func(values []rankedCandidate) []string {
+		result := make([]string, 0, len(values))
+		for _, candidate := range values {
+			result = append(result, candidate.address)
+		}
+		return result
 	}
 
 	if len(preferred) > 0 {
-		return limitStrings(preferred, maxPreferredLANAddresses)
+		sortRanked(preferred)
+		return limitStrings(addresses(preferred), maxPreferredLANAddresses)
 	}
-	return limitStrings(virtualBridges, maxVirtualBridgeLANAddresses)
+	sortRanked(fallbacks)
+	return limitStrings(addresses(fallbacks), maxVirtualBridgeLANAddresses)
+}
+
+func isLikelyPhysicalInterface(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	return name == "wifi" ||
+		strings.HasPrefix(name, "wl") ||
+		strings.HasPrefix(name, "en") ||
+		strings.HasPrefix(name, "eth")
+}
+
+func isLikelyTunnelInterface(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	return strings.HasPrefix(name, "tailscale") ||
+		strings.HasPrefix(name, "wg") ||
+		strings.HasPrefix(name, "tun") ||
+		strings.HasPrefix(name, "utun") ||
+		strings.HasPrefix(name, "tap")
+}
+
+func bytesCompareIPv4(left string, right string) int {
+	leftIP := net.ParseIP(left).To4()
+	rightIP := net.ParseIP(right).To4()
+	for index := 0; index < net.IPv4len; index++ {
+		if leftIP[index] < rightIP[index] {
+			return -1
+		}
+		if leftIP[index] > rightIP[index] {
+			return 1
+		}
+	}
+	return 0
 }
 
 func isLikelyVirtualBridgeInterface(name string) bool {
