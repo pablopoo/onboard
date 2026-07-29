@@ -21,6 +21,7 @@ bash tests/install-go-latest-test.sh
 bash tests/build-release-test.sh
 npm run test:js
 npm run security:npm
+govulncheck ./...
 GOCACHE=/tmp/onboard-go-build-cache /usr/local/go/bin/go test ./...
 timeout 180s tests/local-browser-smoke.sh
 git diff --check

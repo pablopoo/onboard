@@ -47,6 +47,15 @@ Before adding a dependency:
 npm run security:npm
 npm run test:js
 GOCACHE=/tmp/onboard-go-build-cache /usr/local/go/bin/go test ./...
+govulncheck ./...
+```
+
+`govulncheck` is a release gate. If it is missing, do not release; install the
+official scanner and run it again:
+
+```bash
+go install golang.org/x/vuln/cmd/govulncheck@latest
+govulncheck ./...
 ```
 
 For suspected malicious package exposure, isolate the machine before rotating

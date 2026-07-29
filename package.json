@@ -2,10 +2,10 @@
   "name": "onboard",
   "private": true,
   "author": "Pablo",
-  "packageManager": "npm@11.6.2",
+  "packageManager": "npm@11.16.0",
   "engines": {
-    "node": "24.11.1",
-    "npm": "11.6.2"
+    "node": "24.18.0",
+    "npm": "11.16.0"
   },
   "type": "module",
   "scripts": {
