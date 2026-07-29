@@ -9,9 +9,11 @@ import (
 	"io"
 	"io/fs"
 	"math"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -61,6 +63,17 @@ type Config struct {
 	BaseURLs            []string
 	RelayHub            *hub.Hub
 	PresenterCapability string
+	RelayPingInterval   time.Duration
+	RelayPingTimeout    time.Duration
+}
+
+func HTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 << 10,
+	}
 }
 
 func New(config Config) http.Handler {
@@ -69,6 +82,15 @@ func New(config Config) http.Handler {
 	relay := config.RelayHub
 	if relay == nil {
 		relay = hub.New()
+	}
+	connections := newConnectionGate()
+	pingInterval := config.RelayPingInterval
+	if pingInterval <= 0 {
+		pingInterval = 15 * time.Second
+	}
+	pingTimeout := config.RelayPingTimeout
+	if pingTimeout <= 0 {
+		pingTimeout = 5 * time.Second
 	}
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -89,7 +111,13 @@ func New(config Config) http.Handler {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/api/share", shareEndpoint(config.BaseURLs))
-	mux.HandleFunc("/ws/relay", relayEndpoint(relay, config.PresenterCapability))
+	mux.HandleFunc("/ws/relay", relayEndpoint(
+		relay,
+		config.PresenterCapability,
+		connections,
+		pingInterval,
+		pingTimeout,
+	))
 
 	return securityHeaders(mux)
 }
@@ -144,8 +172,21 @@ func serveAsset(w http.ResponseWriter, r *http.Request, name string) {
 	_, _ = w.Write(content)
 }
 
-func relayEndpoint(relay *hub.Hub, presenterCapability string) http.HandlerFunc {
+func relayEndpoint(
+	relay *hub.Hub,
+	presenterCapability string,
+	connections *connectionGate,
+	pingInterval time.Duration,
+	pingTimeout time.Duration,
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		releaseConnection, ok := connections.acquire(r.RemoteAddr)
+		if !ok {
+			http.Error(w, "relay connection limit reached", http.StatusServiceUnavailable)
+			return
+		}
+		defer releaseConnection()
+
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return
@@ -155,6 +196,7 @@ func relayEndpoint(relay *hub.Hub, presenterCapability string) http.HandlerFunc 
 
 		role := relayRole(r)
 		presenter := role == hub.RoleBoard
+		presenterOwner := r.RemoteAddr
 		if presenter {
 			if !presenterAuthorized(presenterCapability, r.URL.Query().Get("presenter")) {
 				_ = writeRelaySystemEvent(conn, relaySystemEvent{
@@ -165,7 +207,7 @@ func relayEndpoint(relay *hub.Hub, presenterCapability string) http.HandlerFunc 
 				_ = conn.Close(websocket.StatusPolicyViolation, "presenter capability required")
 				return
 			}
-			if !relay.AcquirePresenter() {
+			if !relay.AcquirePresenter(presenterOwner) {
 				_ = writeRelaySystemEvent(conn, relaySystemEvent{
 					Type:    "system:presenter-conflict",
 					Payload: map[string]any{"reason": "presenter-active"},
@@ -174,7 +216,7 @@ func relayEndpoint(relay *hub.Hub, presenterCapability string) http.HandlerFunc 
 				_ = conn.Close(websocket.StatusPolicyViolation, "presenter active")
 				return
 			}
-			defer relay.ReleasePresenter()
+			defer relay.ReleasePresenter(presenterOwner)
 		}
 
 		snapshot, events, unsubscribe := relay.SubscribeWithSnapshotRole(role)
@@ -202,13 +244,30 @@ func relayEndpoint(relay *hub.Hub, presenterCapability string) http.HandlerFunc 
 		writerDone := make(chan struct{})
 		go func() {
 			defer close(writerDone)
-			for event := range events {
-				if err := writeRelayEvent(conn, event); err != nil {
+			ticker := time.NewTicker(pingInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case event, ok := <-events:
+					if !ok {
+						_ = conn.CloseNow()
+						return
+					}
+					if err := writeRelayEvent(conn, event); err != nil {
+						_ = conn.CloseNow()
+						return
+					}
+				case <-ticker.C:
+					ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
+					err := conn.Ping(ctx)
+					cancel()
+					if err == nil {
+						continue
+					}
 					_ = conn.CloseNow()
 					return
 				}
 			}
-			_ = conn.CloseNow()
 		}()
 
 		readCtx := context.Background()
@@ -235,6 +294,45 @@ func relayEndpoint(relay *hub.Hub, presenterCapability string) http.HandlerFunc 
 		_ = conn.Close(websocket.StatusNormalClosure, "")
 		<-writerDone
 	}
+}
+
+type connectionGate struct {
+	mu       sync.Mutex
+	total    int
+	bySource map[string]int
+}
+
+func newConnectionGate() *connectionGate {
+	return &connectionGate{bySource: make(map[string]int)}
+}
+
+func (g *connectionGate) acquire(remoteAddr string) (func(), bool) {
+	source := remoteAddr
+	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		source = host
+	}
+
+	g.mu.Lock()
+	if g.total >= 128 || g.bySource[source] >= 64 {
+		g.mu.Unlock()
+		return nil, false
+	}
+	g.total++
+	g.bySource[source]++
+	g.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			g.total--
+			g.bySource[source]--
+			if g.bySource[source] == 0 {
+				delete(g.bySource, source)
+			}
+		})
+	}, true
 }
 
 func presenterAuthorized(expected string, supplied string) bool {

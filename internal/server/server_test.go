@@ -77,6 +77,21 @@ func TestBrowserRoutesSetSecurityHeaders(t *testing.T) {
 	}
 }
 
+func TestHTTPServerUsesBoundedHeaderAndIdleTimeouts(t *testing.T) {
+	t.Parallel()
+
+	httpServer := server.HTTPServer(http.NotFoundHandler())
+	if httpServer.ReadHeaderTimeout != 5*time.Second {
+		t.Fatalf("ReadHeaderTimeout = %s, want 5s", httpServer.ReadHeaderTimeout)
+	}
+	if httpServer.IdleTimeout != 60*time.Second {
+		t.Fatalf("IdleTimeout = %s, want 60s", httpServer.IdleTimeout)
+	}
+	if httpServer.MaxHeaderBytes != 16<<10 {
+		t.Fatalf("MaxHeaderBytes = %d, want %d", httpServer.MaxHeaderBytes, 16<<10)
+	}
+}
+
 func TestServesPWAIconPNGs(t *testing.T) {
 	t.Parallel()
 
@@ -411,6 +426,30 @@ func TestRelayAuthorizesPresenterCapabilityBeforeMutation(t *testing.T) {
 	defer conflict.CloseNow()
 	if eventType := readRelayEventType(t, conflict); eventType != "system:presenter-conflict" {
 		t.Fatalf("conflict frame type = %q, want system:presenter-conflict", eventType)
+	}
+}
+
+func TestRelayHeartbeatReleasesUnresponsivePresenter(t *testing.T) {
+	t.Parallel()
+
+	const capability = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+	testServer := httptest.NewServer(server.New(server.Config{
+		Mode:                "local",
+		PresenterCapability: capability,
+		RelayPingInterval:   10 * time.Millisecond,
+		RelayPingTimeout:    20 * time.Millisecond,
+	}))
+	t.Cleanup(testServer.Close)
+
+	stale := dialRelayPath(t, testServer, "/ws/relay?role=board&presenter="+capability)
+	waitForRelayReady(t, stale)
+	defer stale.CloseNow()
+	time.Sleep(80 * time.Millisecond)
+
+	replacement := dialRelayPath(t, testServer, "/ws/relay?role=board&presenter="+capability)
+	defer closeWebSocket(t, replacement)
+	if eventType := readRelayEventType(t, replacement); eventType != "system:relay-ready" {
+		t.Fatalf("replacement first frame = %q, want system:relay-ready", eventType)
 	}
 }
 

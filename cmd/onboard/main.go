@@ -42,7 +42,7 @@ func main() {
 	})
 	writeStartupURLs(os.Stdout, baseURL, baseURLs, capability)
 
-	httpServer := &http.Server{Handler: handler}
+	httpServer := server.HTTPServer(handler)
 	if err := httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("serve: %v", err)
 	}

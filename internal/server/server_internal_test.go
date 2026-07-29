@@ -2,8 +2,13 @@ package server
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"onboard/internal/hub"
 )
 
 func TestParseRelayEventRejectsProtocolLimits(t *testing.T) {
@@ -155,5 +160,64 @@ func validRelayEventMap() map[string]any {
 			"width":    float64(3),
 			"point":    map[string]any{"x": 0.1, "y": 0.2},
 		},
+	}
+}
+
+func TestConnectionGateEnforcesPerSourceAndGlobalLimits(t *testing.T) {
+	t.Parallel()
+
+	gate := newConnectionGate()
+	var releases []func()
+	for index := 0; index < 64; index++ {
+		release, ok := gate.acquire("192.168.1.10:1234")
+		if !ok {
+			t.Fatalf("per-source connection %d rejected", index+1)
+		}
+		releases = append(releases, release)
+	}
+	if _, ok := gate.acquire("192.168.1.10:9999"); ok {
+		t.Fatal("65th connection for one source accepted")
+	}
+	for index := 0; index < 64; index++ {
+		release, ok := gate.acquire("192.168.1.11:1234")
+		if !ok {
+			t.Fatalf("global connection %d rejected before 128", index+65)
+		}
+		releases = append(releases, release)
+	}
+	if _, ok := gate.acquire("192.168.1.12:1234"); ok {
+		t.Fatal("129th global connection accepted")
+	}
+
+	for _, release := range releases {
+		release()
+		release()
+	}
+	if gate.total != 0 || len(gate.bySource) != 0 {
+		t.Fatalf("gate counters after release = total %d, sources %#v", gate.total, gate.bySource)
+	}
+}
+
+func TestRelayEndpointReturnsServiceUnavailableWhenGateIsFull(t *testing.T) {
+	t.Parallel()
+
+	gate := newConnectionGate()
+	for index := 0; index < 64; index++ {
+		if _, ok := gate.acquire("192.168.1.10:1234"); !ok {
+			t.Fatal("failed to fill first source")
+		}
+		if _, ok := gate.acquire("192.168.1.11:1234"); !ok {
+			t.Fatal("failed to fill second source")
+		}
+	}
+
+	handler := relayEndpoint(hub.New(), "", gate, time.Second, time.Second)
+	request := httptest.NewRequest(http.MethodGet, "/ws/relay", nil)
+	request.RemoteAddr = "192.168.1.12:1234"
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("overflow status = %d, want 503", recorder.Code)
 	}
 }

@@ -33,7 +33,7 @@ type Hub struct {
 	appliedEventIDs     map[string]struct{}
 	appliedEventIDOrder []string
 	subscribers         map[*subscription]struct{}
-	presenterActive     bool
+	presenterOwner      string
 }
 
 type subscription struct {
@@ -224,22 +224,26 @@ func (h *Hub) viewerCountLocked() int {
 	return count
 }
 
-func (h *Hub) AcquirePresenter() bool {
+func (h *Hub) AcquirePresenter(owner string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if h.presenterActive {
+	if owner == "" || h.presenterOwner != "" {
 		return false
 	}
-	h.presenterActive = true
+	h.presenterOwner = owner
 	return true
 }
 
-func (h *Hub) ReleasePresenter() {
+func (h *Hub) ReleasePresenter(owner string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	h.presenterActive = false
+	if owner == "" || h.presenterOwner != owner {
+		return false
+	}
+	h.presenterOwner = ""
+	return true
 }
 
 func (s *subscription) close() {

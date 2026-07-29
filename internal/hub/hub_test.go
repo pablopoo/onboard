@@ -492,23 +492,30 @@ func TestSlowViewerDropsBeforeBufferingMultipleLargeBackgrounds(t *testing.T) {
 	}
 }
 
-func TestPresenterLockAllowsOnlyOneActivePresenter(t *testing.T) {
+func TestPresenterLockReleaseRequiresTheCurrentOwner(t *testing.T) {
 	t.Parallel()
 
 	relay := hub.New()
 
-	if !relay.AcquirePresenter() {
+	if !relay.AcquirePresenter("owner-a") {
 		t.Fatal("first presenter acquire failed")
 	}
-	if relay.AcquirePresenter() {
+	if relay.AcquirePresenter("owner-b") {
 		t.Fatal("second presenter acquire succeeded while presenter active")
 	}
-
-	relay.ReleasePresenter()
-	if !relay.AcquirePresenter() {
+	if relay.ReleasePresenter("owner-b") {
+		t.Fatal("non-owner released presenter")
+	}
+	if relay.AcquirePresenter("owner-b") {
+		t.Fatal("non-owner acquired presenter after failed release")
+	}
+	if !relay.ReleasePresenter("owner-a") {
+		t.Fatal("current owner failed to release presenter")
+	}
+	if !relay.AcquirePresenter("owner-b") {
 		t.Fatal("presenter acquire failed after release")
 	}
-	relay.ReleasePresenter()
+	relay.ReleasePresenter("owner-b")
 }
 
 func assertRestoreEvent(t *testing.T, event hub.Event, wantID string, wantSurface string, wantStrokeIDs []string) {
