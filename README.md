@@ -22,6 +22,10 @@ The release path is intentionally singular: a Go local WebSocket relay binary.
 The user runs one executable on the machine that hosts the board, then opens the
 Board and Viewer URLs from browsers on the same LAN.
 
+The printed Board URL contains a random local presenter capability after `#`.
+Treat that link as a local secret and use it only on the drawing device. Viewer
+URLs contain no capability and are the links intended for screen sharing.
+
 ## Presenter And Viewer
 
 Presenter tools on the Board include:
@@ -113,6 +117,8 @@ The release script writes:
 - `dist/onboard-windows-arm64.exe`
 - `dist/onboard-macos-amd64`
 - `dist/onboard-macos-arm64`
+- `dist/LICENSE`
+- `dist/THIRD_PARTY_NOTICES.md`
 - `dist/checksums.txt`
 
 See `docs/release.md` for the release checklist and manual sanity pass.
@@ -124,6 +130,7 @@ bash tests/build-release-test.sh
 GOCACHE=/tmp/onboard-go-build-cache /usr/local/go/bin/go test ./...
 npm run test:js
 npm run security:npm
+govulncheck ./...
 bash tests/local-browser-smoke.sh
 git diff --check
 ```

@@ -58,8 +58,8 @@ The Viewer must not show drawing tools, selectors, or presenter-only controls.
 4. **Separation:** presenter controls must not leak into the shared viewer.
 5. **Iteration:** each phase should produce a working slice or a useful project artifact.
 
-## Open Decisions
+## Current Decisions
 
-- Whether first persistence is in-memory only or file-backed.
-- Exact visual treatment for chalk versus marker strokes.
-- Exact default expiration time for ephemeral writing.
+- State is in-memory only; restarting the local binary clears the board.
+- Marker and chalk retain distinct renderer treatments matched to board type.
+- Ephemeral writing expires four seconds after the stroke begins.

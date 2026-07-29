@@ -18,7 +18,7 @@ Board browser
 Go local binary
   serves embedded web files
   owns /ws/relay
-  keeps in-memory event state
+  keeps bounded in-memory board state
   broadcasts events to connected viewers
 
 Viewer browser
@@ -211,6 +211,18 @@ Board state lives in memory in the local Go process.
   current board snapshot.
 - Persistence is deferred until repeated real use proves it is needed.
 
+The hub stores a compact current snapshot, bounded stroke/point totals, and a
+bounded recent-event ID set; it does not retain an unbounded event history.
+On connection it sends the snapshot before `system:relay-ready`. Browser status
+changes to Connected only after that ready frame, and queued Board events are
+reapplied after an older reconnect snapshot.
+
+The Board URL fragment contains a random local presenter capability. The
+fragment is removed from the address bar after being stored locally and is sent
+only in the Board WebSocket query. Viewer URLs remain capability-free. The
+relay allows one presenter owner, caps total/per-source connections, and uses
+WebSocket heartbeat checks to release dead connections.
+
 ## Release Builds
 
 Release binaries are cross-compiled with `CGO_ENABLED=0` using
@@ -223,8 +235,14 @@ dist/onboard-windows-amd64.exe
 dist/onboard-windows-arm64.exe
 dist/onboard-macos-amd64
 dist/onboard-macos-arm64
+dist/LICENSE
+dist/THIRD_PARTY_NOTICES.md
 dist/checksums.txt
 ```
+
+Release builds use `-trimpath`, omit local VCS stamping, strip debug symbols,
+and checksum the binaries and both notice files. `DIST_DIR` can select an output
+directory without deleting unrelated files.
 
 The build script is `scripts/build-release.sh`; its shell check is
 `tests/build-release-test.sh`. The release checklist is `docs/release.md`.

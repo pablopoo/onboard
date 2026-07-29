@@ -127,6 +127,9 @@ const homeUrl = boardUrl.replace(/\/board(?:[?#].*)?$/, "/");
 if (!boardUrl || !viewerUrl) {
   throw new Error("Board and Viewer URLs must be provided in the environment.");
 }
+if (viewerUrl.includes("presenter=")) {
+  throw new Error("Viewer URL leaked the presenter capability.");
+}
 
 await page.context().route("**/favicon.ico", (route) =>
   route.fulfill({ status: 204, body: "" }),
@@ -204,6 +207,40 @@ function countDarkInkPixelsInCanvas() {
   return pixels;
 }
 
+function darkInkBoundsInCanvas() {
+  const canvas = document.querySelector("canvas");
+  if (!canvas) {
+    return null;
+  }
+
+  const ctx = canvas.getContext("2d");
+  const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  let minY = canvas.height;
+  let maxY = -1;
+
+  for (let index = 0; index < data.length; index += 4) {
+    if (
+      data[index + 3] > 0 &&
+      data[index] < 90 &&
+      data[index + 1] < 100 &&
+      data[index + 2] < 120
+    ) {
+      const pixelIndex = index / 4;
+      const y = Math.floor(pixelIndex / canvas.width);
+      minY = Math.min(minY, y);
+      maxY = Math.max(maxY, y);
+    }
+  }
+
+  if (maxY < minY) {
+    return null;
+  }
+  const rect = canvas.getBoundingClientRect();
+  return {
+    cssThickness: ((maxY - minY + 1) * rect.height) / canvas.height,
+  };
+}
+
 function countPointerPixelsInCanvas() {
   const canvas = document.querySelector("canvas");
   if (!canvas) {
@@ -242,6 +279,10 @@ function canvasCenterColor() {
 
 async function darkInkPixels(targetPage) {
   return targetPage.evaluate(countDarkInkPixelsInCanvas);
+}
+
+async function darkInkThickness(targetPage) {
+  return targetPage.evaluate(darkInkBoundsInCanvas);
 }
 
 async function pointerPixels(targetPage) {
@@ -660,43 +701,6 @@ async function installRelaySocketProbe(targetPage) {
   });
 }
 
-async function waitForRelayProbeOpen(targetPage, minimumTotal = 1) {
-  await targetPage.waitForFunction(
-    (minimum) => {
-      const probe = window.__onboardRelaySocketProbe;
-      return Boolean(
-        probe && probe.totalCount() >= minimum && probe.openCount() >= 1,
-      );
-    },
-    minimumTotal,
-    { timeout: 8000 },
-  );
-}
-
-async function forceRelayReconnect(targetPage, label) {
-  const beforeTotal = await targetPage.evaluate(
-    () => window.__onboardRelaySocketProbe?.totalCount() ?? 0,
-  );
-  const closed = await targetPage.evaluate(
-    () => window.__onboardRelaySocketProbe?.closeOpenSockets() ?? 0,
-  );
-
-  if (closed < 1) {
-    throw new Error(`${label} had no open relay socket to close.`);
-  }
-
-  await targetPage.waitForFunction(
-    (previousTotal) => {
-      const probe = window.__onboardRelaySocketProbe;
-      return Boolean(
-        probe && probe.totalCount() > previousTotal && probe.openCount() >= 1,
-      );
-    },
-    beforeTotal,
-    { timeout: 10000 },
-  );
-}
-
 await checkWithoutConsoleErrors("Home share links", async () => {
   await page.goto(homeUrl, { waitUntil: "domcontentloaded" });
   await page.waitForSelector("[data-share-list] .share-row", { timeout: 5000 });
@@ -790,6 +794,59 @@ await checkWithoutConsoleErrors("Board", async () => {
   }
 });
 
+await checkWithoutConsoleErrors("Wrong presenter capability is rejected", async () => {
+  const wrongContext = await createBrowserContext({
+    viewport: { width: 1000, height: 700 },
+  });
+  const wrongBoardPage = await wrongContext.newPage();
+  try {
+    const wrongBoardUrl = boardUrl.replace(
+      /#presenter=[^&]*/,
+      `#presenter=${"Z".repeat(43)}`,
+    );
+    await wrongBoardPage.goto(wrongBoardUrl, { waitUntil: "domcontentloaded" });
+    await wrongBoardPage.waitForFunction(
+      () =>
+        document
+          .querySelector("[data-board-session]")
+          ?.textContent?.includes("Presenter link required"),
+      undefined,
+      { timeout: 5000 },
+    );
+    const enabledPresenterControls = await wrongBoardPage.evaluate(() => {
+      const names = [
+        "surface",
+        "pen",
+        "eraser",
+        "pointer",
+        "ephemeral",
+        "tip-size",
+        "eraser-size",
+        "clear",
+        "quick-undo",
+        "toolbar-toggle",
+        "background-file",
+        "background-upload",
+        "background-capture",
+        "background-remove",
+      ];
+      return names.filter(
+        (name) =>
+          document.querySelector(`[data-board-control="${name}"]`)?.disabled !==
+          true,
+      );
+    });
+    if (enabledPresenterControls.length > 0) {
+      throw new Error(
+        `Wrong capability left presenter controls enabled: ` +
+          enabledPresenterControls.join(", "),
+      );
+    }
+  } finally {
+    await wrongContext.close();
+  }
+});
+
 await checkWithoutConsoleErrors("Mobile board toolbar", async () => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(boardUrl, { waitUntil: "domcontentloaded" });
@@ -817,6 +874,8 @@ await checkWithoutConsoleErrors("Mobile board toolbar", async () => {
         (dockRect?.height ?? 0) > 0,
       toolbarIgnoresPointer:
         Boolean(toolbar) && getComputedStyle(toolbar).pointerEvents === "none",
+      toolbarInert: toolbar?.inert === true,
+      toolbarAriaHidden: toolbar?.getAttribute("aria-hidden") === "true",
     };
   });
 
@@ -831,6 +890,9 @@ await checkWithoutConsoleErrors("Mobile board toolbar", async () => {
   }
   if (!collapsed.toolbarIgnoresPointer) {
     throw new Error("Collapsed mobile toolbar should not intercept canvas input.");
+  }
+  if (!collapsed.toolbarInert || !collapsed.toolbarAriaHidden) {
+    throw new Error("Collapsed mobile toolbar remains exposed to keyboard focus.");
   }
 
   await page.click('[data-board-control="toolbar-toggle"]');
@@ -890,19 +952,26 @@ await checkWithoutConsoleErrors("Mobile board toolbar", async () => {
     );
   }
 
+  await page.focus('[data-board-control="pen"]');
   await page.click('[data-board-control="toolbar-close"]');
   await page.waitForFunction(() =>
     document.querySelector("#board-app")?.classList.contains("is-toolbar-collapsed"),
   );
 
-  const minimized = await page.evaluate(
-    () =>
+  const minimized = await page.evaluate(() => ({
+    expanded:
       document
         .querySelector('[data-board-control="toolbar-toggle"]')
         ?.getAttribute("aria-expanded") ?? "",
-  );
-  if (minimized !== "false") {
+    focusReturned:
+      document.activeElement ===
+      document.querySelector('[data-board-control="toolbar-toggle"]'),
+  }));
+  if (minimized.expanded !== "false") {
     throw new Error("Mobile board minimize control did not collapse the toolbar.");
+  }
+  if (!minimized.focusReturned) {
+    throw new Error("Mobile board did not return focus to the toolbar toggle.");
   }
 });
 
@@ -937,6 +1006,53 @@ await checkWithoutConsoleErrors("Mobile board drawing sync", async () => {
   }
 });
 
+await checkWithoutConsoleErrors("Mobile second pointer preserves owned stroke", async () => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(boardUrl, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("[data-board-canvas]", { timeout: 5000 });
+  await clearBoardCanvas(page);
+
+  const viewerPage = await page.context().newPage();
+  try {
+    await viewerPage.goto(viewerUrl, { waitUntil: "domcontentloaded" });
+    await viewerPage.waitForFunction(
+      () =>
+        document.querySelector("[data-viewer-status]")?.dataset
+          ?.viewerConnection === "Connected",
+      undefined,
+      { timeout: 5000 },
+    );
+    const beforePixels = await darkInkPixels(viewerPage);
+    await page.evaluate(() => {
+      const canvas = document.querySelector("[data-board-canvas]");
+      const rect = canvas.getBoundingClientRect();
+      canvas.setPointerCapture = () => {};
+      canvas.releasePointerCapture = () => {};
+      const dispatch = (type, pointerId, xRatio) => {
+        canvas.dispatchEvent(
+          new PointerEvent(type, {
+            bubbles: true,
+            pointerId,
+            pointerType: "touch",
+            clientX: rect.left + rect.width * xRatio,
+            clientY: rect.top + rect.height * 0.44,
+            buttons: type === "pointerup" ? 0 : 1,
+          }),
+        );
+      };
+      dispatch("pointerdown", 1, 0.25);
+      dispatch("pointermove", 1, 0.4);
+      dispatch("pointerdown", 2, 0.55);
+      dispatch("pointerup", 2, 0.55);
+      dispatch("pointermove", 1, 0.7);
+      dispatch("pointerup", 1, 0.75);
+    });
+    await waitForDarkInkPixelsAbove(viewerPage, beforePixels);
+  } finally {
+    await viewerPage.close();
+  }
+});
+
 await checkWithoutConsoleErrors("High DPR resize drawing sync", async () => {
   await page.goto("about:blank");
   await page.waitForTimeout(200);
@@ -947,6 +1063,11 @@ await checkWithoutConsoleErrors("High DPR resize drawing sync", async () => {
   });
   const boardPage = await highDPRContext.newPage();
   const viewerPage = await highDPRContext.newPage();
+  const standardDPRContext = await createBrowserContext({
+    viewport: { width: 430, height: 932 },
+    deviceScaleFactor: 1,
+  });
+  const standardViewerPage = await standardDPRContext.newPage();
 
   try {
     await checkPageWithoutConsoleErrors(boardPage, "High DPR relay board", async () => {
@@ -968,6 +1089,16 @@ await checkWithoutConsoleErrors("High DPR resize drawing sync", async () => {
             undefined,
             { timeout: 5000 },
           );
+          await standardViewerPage.goto(viewerUrl, {
+            waitUntil: "domcontentloaded",
+          });
+          await standardViewerPage.waitForFunction(
+            () =>
+              document.querySelector("[data-viewer-status]")?.dataset
+                ?.viewerConnection === "Connected",
+            undefined,
+            { timeout: 5000 },
+          );
 
           await waitForCanvasBackstoreToMatchDisplay(
             boardPage,
@@ -983,6 +1114,22 @@ await checkWithoutConsoleErrors("High DPR resize drawing sync", async () => {
           const phoneBeforePixels = await darkInkPixels(viewerPage);
           await drawRawBoardCanvasStroke(boardPage, 0.42);
           await waitForDarkInkPixelsAbove(viewerPage, phoneBeforePixels);
+          await waitForDarkInkPixelsAbove(standardViewerPage, 0);
+          const highDPRThickness = await darkInkThickness(viewerPage);
+          const standardDPRThickness = await darkInkThickness(standardViewerPage);
+          if (
+            !highDPRThickness ||
+            !standardDPRThickness ||
+            Math.abs(
+              highDPRThickness.cssThickness - standardDPRThickness.cssThickness,
+            ) > 2
+          ) {
+            throw new Error(
+              "Marker apparent width differs across DPR 1/2: " +
+                `${JSON.stringify(standardDPRThickness)} vs ` +
+                `${JSON.stringify(highDPRThickness)}.`,
+            );
+          }
 
           await clearBoardCanvas(boardPage);
           await waitForDarkInkPixelsAtMost(viewerPage, phoneBeforePixels + 10);
@@ -1008,6 +1155,7 @@ await checkWithoutConsoleErrors("High DPR resize drawing sync", async () => {
     });
   } finally {
     await highDPRContext.close();
+    await standardDPRContext.close();
   }
 });
 
@@ -1137,17 +1285,17 @@ await checkWithoutConsoleErrors("Live relay drawing sync", async () => {
 
 await checkWithoutConsoleErrors("Relay reconnect recovery", async () => {
   await page.setViewportSize({ width: 1000, height: 700 });
-  await installRelaySocketProbe(page);
   await page.goto(boardUrl, { waitUntil: "domcontentloaded" });
   await page.waitForSelector("[data-board-canvas]", { timeout: 5000 });
-  await waitForRelayProbeOpen(page);
   await clearBoardCanvas(page);
   await disableEphemeralInk(page);
 
-  const viewerPage = await page.context().newPage();
+  const viewerContext = await createBrowserContext({
+    viewport: { width: 1000, height: 700 },
+  });
+  const viewerPage = await viewerContext.newPage();
   try {
     await checkPageWithoutConsoleErrors(viewerPage, "Relay reconnect viewer", async () => {
-      await installRelaySocketProbe(viewerPage);
       await viewerPage.setViewportSize({ width: 1000, height: 700 });
       await viewerPage.goto(viewerUrl, { waitUntil: "domcontentloaded" });
       await viewerPage.waitForSelector("[data-viewer-canvas]", { timeout: 5000 });
@@ -1158,9 +1306,37 @@ await checkWithoutConsoleErrors("Relay reconnect recovery", async () => {
         undefined,
         { timeout: 5000 },
       );
-      await waitForRelayProbeOpen(viewerPage);
 
-      await forceRelayReconnect(viewerPage, "Viewer");
+      const readyOrder = await viewerPage.evaluate(async () => {
+        const url = new URL("/ws/relay?role=viewer", location.href);
+        url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+        return new Promise((resolve, reject) => {
+          const socket = new WebSocket(url);
+          const types = [];
+          const timer = setTimeout(() => {
+            socket.close();
+            reject(new Error("timed out waiting for relay-ready"));
+          }, 5000);
+          socket.addEventListener("message", (message) => {
+            const type = JSON.parse(String(message.data))?.type ?? "";
+            types.push(type);
+            if (type === "system:relay-ready") {
+              clearTimeout(timer);
+              socket.close();
+              resolve(types);
+            }
+          });
+          socket.addEventListener("error", () => {
+            clearTimeout(timer);
+            reject(new Error("relay ordering socket failed"));
+          });
+        });
+      });
+      if (readyOrder.at(-1) !== "system:relay-ready") {
+        throw new Error(`Relay ready ordering was ${readyOrder.join(", ")}.`);
+      }
+
+      await viewerPage.reload({ waitUntil: "domcontentloaded" });
       await viewerPage.waitForFunction(
         () =>
           document.querySelector("[data-viewer-status]")?.dataset
@@ -1169,7 +1345,8 @@ await checkWithoutConsoleErrors("Relay reconnect recovery", async () => {
         { timeout: 10000 },
       );
 
-      await forceRelayReconnect(page, "Board");
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.waitForSelector("[data-board-canvas]", { timeout: 5000 });
       await page.waitForFunction(
         () => {
           const title =
@@ -1184,13 +1361,12 @@ await checkWithoutConsoleErrors("Relay reconnect recovery", async () => {
         undefined,
         { timeout: 10000 },
       );
-
       const beforePixels = await darkInkPixels(viewerPage);
       await drawHorizontalBoardStroke(page, 0.38);
       await waitForDarkInkPixelsAbove(viewerPage, beforePixels, 50, 10000);
     });
   } finally {
-    await viewerPage.close();
+    await viewerContext.close();
   }
 });
 
@@ -1505,6 +1681,10 @@ await checkWithoutConsoleErrors("Viewer", async () => {
       canvasHeight: rect?.height ?? 0,
       fullscreenButtons: document.querySelectorAll("[data-viewer-fullscreen]")
         .length,
+      fullscreenLabel:
+        document
+          .querySelector("[data-viewer-fullscreen]")
+          ?.getAttribute("aria-label") ?? "",
       forbidden,
       status:
         document.querySelector("[data-viewer-status]")?.dataset
@@ -1534,11 +1714,23 @@ await checkWithoutConsoleErrors("Viewer", async () => {
   if (result.fullscreenButtons !== 1) {
     throw new Error(`Viewer has ${result.fullscreenButtons} fullscreen buttons.`);
   }
+  if (!result.fullscreenLabel.toLowerCase().includes("fullscreen")) {
+    throw new Error("Viewer fullscreen control has no accessible label.");
+  }
   if (result.status !== "Connected") {
     throw new Error(`Viewer did not connect to the local relay. Status: ${result.status}`);
   }
   if (result.visibleStatus !== "" && result.visibleStatus !== "Connected") {
     throw new Error(`Viewer shows non-board status text: ${result.visibleStatus}`);
+  }
+
+  const fullscreenSupported = await page.evaluate(
+    () => document.fullscreenEnabled === true,
+  );
+  if (fullscreenSupported) {
+    await page.click("[data-viewer-fullscreen]");
+    await page.waitForFunction(() => document.fullscreenElement !== null);
+    await page.evaluate(() => document.exitFullscreen());
   }
 });
 

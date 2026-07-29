@@ -32,7 +32,7 @@ internal/server
   serves /, /board, /viewer, /api/share, /health, /ws/relay
 
 internal/hub
-  keeps the event log, presenter lock, viewer count, and broadcasts
+  keeps bounded board state, presenter ownership, viewer count, and broadcasts
 
 web/board
   presenter controller: tools, pointer input, local apply/render, sends events
@@ -71,8 +71,15 @@ The current board is rebuilt by applying these events through the shared
 
 ## Snapshot Behavior
 
-The Go hub keeps the current board state in memory. When a Viewer connects, the
-relay sends the current snapshot first, then live events. This avoids replaying
-the whole history in the Viewer and keeps late-joining Viewer tabs fast.
+The Go hub keeps bounded current board state in memory rather than an unbounded
+event log. When a browser connects, the relay sends the current snapshot first,
+then `system:relay-ready`, then live events. Board and Viewer report Connected
+only after that ready frame. This keeps late joins fast and prevents queued
+Board input from being overwritten by an older reconnect snapshot.
+
+The printed Board URL carries a random presenter capability in its URL fragment.
+The Board stores it locally and sends it only to the local relay; Viewer URLs do
+not contain it. The relay permits one live presenter owner, bounds state and
+connections, and uses WebSocket ping/pong to remove dead owners.
 
 Restarting the Go binary clears the in-memory board.

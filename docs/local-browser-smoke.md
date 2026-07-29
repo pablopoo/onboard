@@ -24,15 +24,16 @@ The check verifies:
 
 - `/` renders share rows with copy buttons and QR codes for Board and Viewer links.
 - `/board` loads without browser console or page errors.
+- A Board with an incorrect presenter capability is rejected with its controls disabled; a correct second Board is rejected only as a presenter conflict.
 - `/board` has a visible canvas, presenter toolbar, expected presenter controls, and a Viewer share link panel with a QR code.
 - `/board` at a phone-sized viewport starts with the compact mobile dock visible and the toolbar collapsed.
-- The mobile toolbar can expand without overflowing the viewport, shows a visible minimize control, and collapses again through that control.
+- The mobile toolbar can expand without overflowing the viewport, shows a visible minimize control, becomes inert while collapsed, and returns focus to its toggle.
 - Drawing from a phone-sized Board with the compact dock collapsed reaches a connected Viewer.
-- High-DPR phone and tablet-sized boards keep canvas backing stores aligned with display size, and drawing still reaches the Viewer after resize.
+- A second touch pointer cannot replace or finish the first pointer's stroke.
+- DPR 1 and DPR 2 viewers keep equivalent apparent stroke width; high-DPR backing stores stay aligned after resize.
 - Changing the Board surface updates the connected viewer canvas surface color.
 - Drawing a marker stroke in the board tab changes pixels in a simultaneously connected viewer tab.
-- Forcibly closing the Board and Viewer relay sockets reconnects them, and drawing
-  after reconnect still reaches the Viewer.
+- Reloading the Board and Viewer reconnects them, preserves the relay snapshot, and drawing after reconnect reaches the Viewer. Deterministic unit coverage additionally verifies queued-stroke rebase across an older reconnect snapshot.
 - Drawing a marker stroke reaches two simultaneously connected viewer tabs.
 - A second Board tab is locked out while the first presenter is active and cannot change connected viewers.
 - Clearing the board after drawing removes the ink from the connected viewer tab.
@@ -42,8 +43,10 @@ The check verifies:
 - A viewer opened after the board already has writing renders the current board state from the relay snapshot.
 - The Board toolbar reports relay viewer presence after a Viewer is connected.
 - `/viewer` loads without browser console or page errors.
-- `/viewer` has a visible canvas and no board controls, buttons, selects, inputs, or toolbar markup.
+- `/viewer` has a visible canvas, its single fullscreen affordance, and no presenter controls, selects, inputs, or toolbar markup.
 - `/viewer` reports `Connected` through hidden status metadata within the timeout.
+- A direct relay join receives its snapshot before `system:relay-ready`, while browser unit coverage verifies that Connected is not reported earlier.
+- The Viewer URL never contains the presenter capability, and fullscreen works when the browser exposes the API.
 - `/viewer` shows no persistent non-board status text after connecting.
 
 The script cleans up the Playwright session and the Go server on exit.
@@ -74,4 +77,4 @@ Manual fallback, if browser automation is unavailable:
 14. Select Pointer on the Board, press on the canvas, confirm the Viewer shows the pointer, then release and confirm it hides.
 15. Enable Fade on the Board, draw one stroke, confirm the Viewer shows it, then confirm the stroke disappears after expiration.
 16. Close the Viewer tab, draw or keep existing writing on the Board, reopen the Viewer URL, and confirm the writing is visible without touching the Board again.
-17. Open the printed Viewer URL and confirm it shows only viewer output markup, with no buttons, selects, inputs, toolbar, or persistent status overlay after connecting, and has no DevTools console errors.
+17. Open the printed Viewer URL and confirm it shows only viewer output plus the fullscreen affordance, with no presenter controls, selectors, inputs, toolbar, capability, or persistent status overlay after connecting, and has no DevTools console errors.
