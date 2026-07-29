@@ -172,6 +172,12 @@ func relayEndpoint(relay *hub.Hub) http.HandlerFunc {
 				return
 			}
 		}
+		if err := writeRelaySystemEvent(conn, relaySystemEvent{
+			Type:    "system:relay-ready",
+			Payload: map[string]any{},
+		}); err != nil {
+			return
+		}
 
 		writerDone := make(chan struct{})
 		go func() {

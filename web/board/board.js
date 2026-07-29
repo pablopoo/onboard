@@ -197,6 +197,9 @@ export function createBoardController({
     }
 
     applyBoardEvent(state, event);
+    if (event?.type === "board:restore" && queuedEvents.length > 0) {
+      reapplyQueuedEventsLocally();
+    }
     scheduleRender();
     updateControls();
   });
@@ -950,6 +953,18 @@ export function createBoardController({
         setSessionStatus("Input paused");
         reportError(error);
       }
+    }
+  }
+
+  function reapplyQueuedEventsLocally() {
+    for (const queued of queuedEvents) {
+      const { id } = queued.event;
+      state.appliedEventIds.delete(id);
+      const index = state.appliedEventIdOrder.indexOf(id);
+      if (index >= 0) {
+        state.appliedEventIdOrder.splice(index, 1);
+      }
+      applyBoardEvent(state, queued.event);
     }
   }
 

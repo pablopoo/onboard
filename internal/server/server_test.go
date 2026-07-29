@@ -213,7 +213,7 @@ func TestRelayAcceptsWebSocketConnection(t *testing.T) {
 	testServer := httptest.NewServer(server.New(server.Config{Mode: "local"}))
 	t.Cleanup(testServer.Close)
 
-	conn := dialRelay(t, testServer)
+	conn := dialRelayPath(t, testServer, "/ws/relay")
 	closeWebSocket(t, conn)
 }
 
@@ -230,7 +230,7 @@ func TestRelaySendsSnapshotEventsOnConnect(t *testing.T) {
 	}))
 	t.Cleanup(testServer.Close)
 
-	conn := dialRelay(t, testServer)
+	conn := dialRelayPath(t, testServer, "/ws/relay")
 	defer closeWebSocket(t, conn)
 
 	got := readRelayEvent(t, conn)
@@ -248,6 +248,54 @@ func TestRelaySendsSnapshotEventsOnConnect(t *testing.T) {
 	if !ok || stroke["strokeId"] != "stroke-1" {
 		t.Fatalf("snapshot stroke = %#v, want stroke-1", strokes[0])
 	}
+}
+
+func TestRelayReadyFollowsOptionalSnapshot(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty hub", func(t *testing.T) {
+		testServer := httptest.NewServer(server.New(server.Config{Mode: "local"}))
+		defer testServer.Close()
+		conn := dialRelayPath(t, testServer, "/ws/relay")
+		defer closeWebSocket(t, conn)
+
+		if eventType := readRelayEventType(t, conn); eventType != "system:relay-ready" {
+			t.Fatalf("first frame type = %q, want system:relay-ready", eventType)
+		}
+	})
+
+	t.Run("populated hub", func(t *testing.T) {
+		relay := hub.New()
+		relay.Record(serverTestEvent("evt-before", "stroke:start"))
+		testServer := httptest.NewServer(server.New(server.Config{Mode: "local", RelayHub: relay}))
+		defer testServer.Close()
+		conn := dialRelayPath(t, testServer, "/ws/relay")
+		defer closeWebSocket(t, conn)
+
+		if eventType := readRelayEventType(t, conn); eventType != "board:restore" {
+			t.Fatalf("first frame type = %q, want board:restore", eventType)
+		}
+		if eventType := readRelayEventType(t, conn); eventType != "system:relay-ready" {
+			t.Fatalf("second frame type = %q, want system:relay-ready", eventType)
+		}
+	})
+}
+
+func readRelayEventType(t *testing.T, conn *websocket.Conn) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read relay frame: %v", err)
+	}
+	var event struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(data, &event); err != nil {
+		t.Fatalf("decode relay frame: %v", err)
+	}
+	return event.Type
 }
 
 func TestRelayBroadcastsValidClientEventToAnotherClient(t *testing.T) {
@@ -282,7 +330,7 @@ func TestRelayRejectsSecondBoardPresenter(t *testing.T) {
 	board := dialRelayRole(t, testServer, "board")
 	defer closeWebSocket(t, board)
 
-	conflict := dialRelayRole(t, testServer, "board")
+	conflict := dialRelayPath(t, testServer, "/ws/relay?role=board")
 	defer conflict.CloseNow()
 
 	got := readRelayEvent(t, conflict)
@@ -504,13 +552,24 @@ func TestRelayAcceptsLargeValidRestoreSnapshots(t *testing.T) {
 func dialRelay(t *testing.T, testServer *httptest.Server) *websocket.Conn {
 	t.Helper()
 
-	return dialRelayPath(t, testServer, "/ws/relay")
+	conn := dialRelayPath(t, testServer, "/ws/relay")
+	waitForRelayReady(t, conn)
+	return conn
 }
 
 func dialRelayRole(t *testing.T, testServer *httptest.Server, role string) *websocket.Conn {
 	t.Helper()
 
-	return dialRelayPath(t, testServer, "/ws/relay?role="+role)
+	conn := dialRelayPath(t, testServer, "/ws/relay?role="+role)
+	waitForRelayReady(t, conn)
+	return conn
+}
+
+func waitForRelayReady(t *testing.T, conn *websocket.Conn) {
+	t.Helper()
+	if eventType := readRelayEventType(t, conn); eventType != "system:relay-ready" {
+		t.Fatalf("initial relay frame type = %q, want system:relay-ready", eventType)
+	}
 }
 
 func dialRelayPath(t *testing.T, testServer *httptest.Server, path string) *websocket.Conn {

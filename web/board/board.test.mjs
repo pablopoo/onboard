@@ -1987,6 +1987,53 @@ test("events before connect update local state and flush after connect resolves"
   ]);
 });
 
+test("queued local stroke survives an older restore before relay ready", async () => {
+  const transport = createFakeTransport({ deferConnect: true });
+  const { controller, elements } = createFixture({
+    transport,
+    eventSessionId: "rebase-session",
+  });
+  const connection = controller.connect();
+
+  elements.canvas.dispatch("pointerdown", {
+    clientX: 60,
+    clientY: 70,
+    pointerId: 7,
+  });
+  elements.canvas.dispatch("pointerup", {
+    clientX: 80,
+    clientY: 90,
+    pointerId: 7,
+  });
+  transport.emit({
+    id: "evt_authoritative_restore",
+    type: "board:restore",
+    boardId: "default",
+    at: 9_000,
+    payload: {
+      surface: "whiteboard",
+      strokes: [],
+      pointer: { visible: false, point: null },
+    },
+  });
+
+  assert.deepEqual(
+    controller.getSnapshot().strokes.map((stroke) => stroke.strokeId),
+    ["stroke_rebase-session_000001"],
+  );
+
+  transport.resolveConnect();
+  await connection;
+  assert.deepEqual(
+    transport.sent.map((event) => event.type),
+    ["stroke:start", "stroke:point", "stroke:end"],
+  );
+  assert.equal(
+    new Set(transport.sent.map((event) => event.id)).size,
+    transport.sent.length,
+  );
+});
+
 test("events before connect stop updating local state when the queue is full", () => {
   const transport = createFakeTransport({
     deferConnect: true,

@@ -4,6 +4,7 @@ export function createWebSocketRelayTransport({
   url,
   WebSocketImpl = WebSocket,
   reconnectDelayMs = 250,
+  readyTimeoutMs = 5_000,
   maxQueuedEvents = 1_000,
   setTimeout: setTimer = globalThis.setTimeout?.bind(globalThis),
   clearTimeout: clearTimer = globalThis.clearTimeout?.bind(globalThis),
@@ -14,28 +15,32 @@ export function createWebSocketRelayTransport({
   let socket = null;
   let connectPromise = null;
   let reconnectTimer = null;
+  let readyTimer = null;
   let started = false;
   let closed = false;
   let hasOpened = false;
+  let relayReady = false;
   let lastStatus = null;
   const outbox = [];
 
-  function handleMessage(message) {
+  function parseMessage(message) {
     let event;
 
     try {
       event = JSON.parse(message.data);
     } catch {
-      return;
+      return null;
     }
 
-    for (const handler of handlers) {
-      handler(event);
-    }
+    return event;
   }
 
   function isSocketOpen(currentSocket = socket) {
     return currentSocket?.readyState === openReadyState;
+  }
+
+  function isRelayReady() {
+    return relayReady && isSocketOpen();
   }
 
   function emitStatus(status) {
@@ -77,7 +82,7 @@ export function createWebSocketRelayTransport({
   }
 
   function flushOutbox() {
-    while (outbox.length > 0 && isSocketOpen()) {
+    while (outbox.length > 0 && isRelayReady()) {
       socket.send(outbox.shift());
     }
   }
@@ -88,8 +93,10 @@ export function createWebSocketRelayTransport({
 
     const currentSocket = new WebSocketImpl(url);
     socket = currentSocket;
+    relayReady = false;
 
     return new Promise((resolve, reject) => {
+      let settled = false;
       function cleanupOpeningListeners() {
         currentSocket.removeEventListener?.("open", handleOpen);
         currentSocket.removeEventListener?.("error", handleErrorBeforeOpen);
@@ -97,32 +104,43 @@ export function createWebSocketRelayTransport({
       }
 
       function cleanupRuntimeListeners() {
-        currentSocket.removeEventListener?.("message", handleMessage);
+        currentSocket.removeEventListener?.("message", handleRuntimeMessage);
         currentSocket.removeEventListener?.("error", handleRuntimeFault);
         currentSocket.removeEventListener?.("close", handleRuntimeFault);
+        if (readyTimer !== null) {
+          clearTimer?.(readyTimer);
+          readyTimer = null;
+        }
       }
 
       function rejectBeforeOpen(error) {
+        if (settled) {
+          return;
+        }
+        settled = true;
         cleanupOpeningListeners();
+        cleanupRuntimeListeners();
         if (socket === currentSocket) {
           socket = null;
         }
+        relayReady = false;
         connectPromise = null;
         reject(error);
+        scheduleReconnect();
       }
 
       function handleOpen() {
         cleanupOpeningListeners();
-        hasOpened = true;
-        connectPromise = null;
-
-        currentSocket.addEventListener("message", handleMessage);
+        currentSocket.addEventListener("message", handleRuntimeMessage);
         currentSocket.addEventListener("error", handleRuntimeFault);
         currentSocket.addEventListener("close", handleRuntimeFault);
-
-        flushOutbox();
-        emitStatus("connected");
-        resolve();
+        if (typeof setTimer === "function") {
+          readyTimer = setTimer(() => {
+            readyTimer = null;
+            rejectBeforeOpen(new Error("WebSocket relay ready timeout"));
+            currentSocket.close();
+          }, readyTimeoutMs);
+        }
       }
 
       function handleErrorBeforeOpen() {
@@ -136,14 +154,47 @@ export function createWebSocketRelayTransport({
       }
 
       function handleRuntimeFault() {
+        if (!relayReady && !settled) {
+          emitStatus(hasOpened ? "reconnecting" : "disconnected");
+          rejectBeforeOpen(new Error("WebSocket failed before relay ready"));
+          return;
+        }
         cleanupRuntimeListeners();
         if (socket === currentSocket) {
           socket = null;
         }
+        relayReady = false;
         connectPromise = null;
         if (!closed && started) {
           emitStatus("reconnecting");
           scheduleReconnect();
+        }
+      }
+
+      function handleRuntimeMessage(message) {
+        const event = parseMessage(message);
+        if (!event) {
+          return;
+        }
+        if (event.type === "system:relay-ready") {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          if (readyTimer !== null) {
+            clearTimer?.(readyTimer);
+            readyTimer = null;
+          }
+          relayReady = true;
+          hasOpened = true;
+          connectPromise = null;
+          flushOutbox();
+          emitStatus("connected");
+          resolve();
+          return;
+        }
+        for (const handler of handlers) {
+          handler(event);
         }
       }
 
@@ -162,7 +213,7 @@ export function createWebSocketRelayTransport({
       started = true;
       closed = false;
 
-      if (isSocketOpen()) {
+      if (isRelayReady()) {
         return Promise.resolve();
       }
 
@@ -177,12 +228,12 @@ export function createWebSocketRelayTransport({
     send(event) {
       const data = JSON.stringify(event);
 
-      if (isSocketOpen()) {
+      if (isRelayReady()) {
         socket.send(data);
         return;
       }
 
-      if (hasOpened && started && !closed) {
+      if (started && !closed) {
         if (outbox.length >= maxQueuedEvents) {
           throw new Error("WebSocket reconnect queue is full");
         }
@@ -219,7 +270,12 @@ export function createWebSocketRelayTransport({
       closed = true;
       started = false;
       clearReconnectTimer();
+      if (readyTimer !== null) {
+        clearTimer?.(readyTimer);
+        readyTimer = null;
+      }
       outbox.length = 0;
+      relayReady = false;
 
       if (!socket) {
         return;

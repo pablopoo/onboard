@@ -76,7 +76,15 @@ function makeFakeWebSocketClass() {
 async function connectAndOpen(transport, WebSocketImpl) {
   const connection = transport.connect();
   WebSocketImpl.instances[0].dispatchOpen();
+  dispatchReady(WebSocketImpl.instances[0]);
   await connection;
+}
+
+function dispatchReady(socket) {
+  socket.dispatchMessage(JSON.stringify({
+    type: "system:relay-ready",
+    payload: {},
+  }));
 }
 
 function makeEvent(overrides = {}) {
@@ -158,9 +166,61 @@ test("connect resolves only after the WebSocket opens", async () => {
   assert.equal(connected, false);
 
   WebSocketImpl.instances[0].dispatchOpen();
+  dispatchReady(WebSocketImpl.instances[0]);
   await connection;
 
   assert.equal(connected, true);
+});
+
+test("connect waits for ready after delivering the snapshot", async () => {
+  const WebSocketImpl = makeFakeWebSocketClass();
+  const transport = createWebSocketRelayTransport({
+    url: "ws://localhost:8080/ws/relay",
+    WebSocketImpl,
+  });
+  const received = [];
+  const statuses = [];
+  let connected = false;
+  transport.onEvent((event) => received.push(event));
+  transport.onStatus((status) => statuses.push(status));
+
+  const connection = transport.connect().then(() => {
+    connected = true;
+  });
+  const socket = WebSocketImpl.instances[0];
+  socket.dispatchOpen();
+  socket.dispatchMessage(JSON.stringify(makeEvent({ type: "board:restore" })));
+  await Promise.resolve();
+
+  assert.equal(connected, false);
+  assert.deepEqual(statuses, ["connecting"]);
+  assert.equal(received.length, 1);
+
+  dispatchReady(socket);
+  await connection;
+
+  assert.equal(connected, true);
+  assert.deepEqual(statuses, ["connecting", "connected"]);
+  assert.equal(received.length, 1);
+});
+
+test("ready flushes sends queued during initial synchronization", async () => {
+  const WebSocketImpl = makeFakeWebSocketClass();
+  const transport = createWebSocketRelayTransport({
+    url: "ws://localhost:8080/ws/relay",
+    WebSocketImpl,
+  });
+  const event = makeEvent({ id: "evt_before_ready" });
+  const connection = transport.connect();
+  const socket = WebSocketImpl.instances[0];
+  socket.dispatchOpen();
+
+  assert.doesNotThrow(() => transport.send(event));
+  assert.deepEqual(socket.sent, []);
+
+  dispatchReady(socket);
+  await connection;
+  assert.deepEqual(socket.sent, [JSON.stringify(event)]);
 });
 
 test("send throws clearly before connect", () => {
@@ -172,16 +232,18 @@ test("send throws clearly before connect", () => {
   assert.throws(() => transport.send(makeEvent()), /connect/i);
 });
 
-test("send throws clearly before the WebSocket is open", () => {
+test("send queues while the initial WebSocket is opening", () => {
   const WebSocketImpl = makeFakeWebSocketClass();
   const transport = createWebSocketRelayTransport({
     url: "ws://localhost:8080/ws/relay",
     WebSocketImpl,
   });
 
+  const event = makeEvent({ id: "evt_initial_open" });
   transport.connect();
 
-  assert.throws(() => transport.send(makeEvent()), /open/i);
+  assert.doesNotThrow(() => transport.send(event));
+  assert.deepEqual(WebSocketImpl.instances[0].sent, []);
 });
 
 test("connect rejects if the WebSocket errors before open", async () => {
@@ -208,6 +270,46 @@ test("connect rejects if the WebSocket closes before open", async () => {
   WebSocketImpl.instances[0].dispatchClose();
 
   await assert.rejects(connection, /open/i);
+});
+
+test("initial failure schedules a reconnect", async () => {
+  const WebSocketImpl = makeFakeWebSocketClass();
+  const timers = makeFakeTimers();
+  const transport = createWebSocketRelayTransport({
+    url: "ws://localhost:8080/ws/relay",
+    WebSocketImpl,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  });
+
+  const connection = transport.connect();
+  WebSocketImpl.instances[0].dispatchError();
+  await assert.rejects(connection, /open/i);
+
+  assert.equal(timers.scheduled.length, 1);
+  assert.equal(timers.scheduled[0].delay, 250);
+  timers.runNext();
+  assert.equal(WebSocketImpl.instances.length, 2);
+});
+
+test("open without ready rejects at the ready timeout", async () => {
+  const WebSocketImpl = makeFakeWebSocketClass();
+  const timers = makeFakeTimers();
+  const transport = createWebSocketRelayTransport({
+    url: "ws://localhost:8080/ws/relay",
+    WebSocketImpl,
+    readyTimeoutMs: 5_000,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  });
+
+  const connection = transport.connect();
+  WebSocketImpl.instances[0].dispatchOpen();
+  assert.equal(timers.scheduled[0].delay, 5_000);
+  timers.runNext();
+
+  await assert.rejects(connection, /ready timeout/i);
+  assert.equal(WebSocketImpl.instances[0].closed, true);
 });
 
 test("message events parse JSON and call registered handlers", async () => {
@@ -296,6 +398,7 @@ test("unexpected close reconnects and keeps event handlers active", async () => 
   assert.equal(WebSocketImpl.instances.length, 2);
   const reconnect = transport.connect();
   WebSocketImpl.instances[1].dispatchOpen();
+  dispatchReady(WebSocketImpl.instances[1]);
   await reconnect;
 
   const event = makeEvent({ id: "evt_after_reconnect" });
@@ -322,6 +425,7 @@ test("status subscribers see reconnecting and connected around runtime reconnect
   timers.runNext();
   const reconnect = transport.connect();
   WebSocketImpl.instances[1].dispatchOpen();
+  dispatchReady(WebSocketImpl.instances[1]);
   await reconnect;
 
   assert.deepEqual(statuses, ["connecting", "connected", "reconnecting", "connected"]);
@@ -362,6 +466,7 @@ test("send queues events while reconnecting and flushes after reopen", async () 
   timers.runNext();
   const reconnect = transport.connect();
   WebSocketImpl.instances[1].dispatchOpen();
+  dispatchReady(WebSocketImpl.instances[1]);
   await reconnect;
 
   assert.deepEqual(WebSocketImpl.instances[1].sent, [JSON.stringify(event)]);
@@ -391,6 +496,7 @@ test("send fails clearly when the reconnect queue is full", async () => {
   timers.runNext();
   const reconnect = transport.connect();
   WebSocketImpl.instances[1].dispatchOpen();
+  dispatchReady(WebSocketImpl.instances[1]);
   await reconnect;
 
   assert.deepEqual(WebSocketImpl.instances[1].sent, [
