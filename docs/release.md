@@ -39,6 +39,13 @@ Build with:
 GOCACHE=/tmp/onboard-go-build-cache scripts/build-release.sh
 ```
 
+Set `DIST_DIR` to write a release into another directory without removing or
+overwriting unrelated files in `dist/`:
+
+```bash
+DIST_DIR=/tmp/onboard-release GOCACHE=/tmp/onboard-go-build-cache scripts/build-release.sh
+```
+
 Expected outputs:
 
 ```text
@@ -48,12 +55,16 @@ dist/onboard-windows-amd64.exe
 dist/onboard-windows-arm64.exe
 dist/onboard-macos-amd64
 dist/onboard-macos-arm64
+dist/LICENSE
+dist/THIRD_PARTY_NOTICES.md
 dist/checksums.txt
 ```
 
-The release script cross-compiles with `CGO_ENABLED=0` and writes SHA-256
-checksums when `sha256sum` or `shasum` is available. Verify checksums from
-inside `dist/` because the checksum file stores artifact basenames.
+The release script cross-compiles with `CGO_ENABLED=0`, strips platform-local
+paths and debug symbols, and requires `sha256sum` or `shasum`. The checksum
+manifest covers all six binaries plus the project and dependency notices.
+Verify it from inside the selected release directory because it stores artifact
+basenames.
 
 ## Manual Sanity Pass
 
