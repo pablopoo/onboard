@@ -25,6 +25,19 @@ const CHALK_SURFACES = new Set(["blackboard", "greenboard"]);
 const MAX_STROKE_WIDTH = 128;
 const MAX_BACKGROUND_DATA_URL_LENGTH = 6_000_000;
 const MAX_BACKGROUND_DIMENSION = 8192;
+const UTF8_ENCODER = new TextEncoder();
+
+export const RELAY_LIMITS = Object.freeze({
+  eventIdBytes: 128,
+  boardIdBytes: 64,
+  strokeIdBytes: 128,
+  colorBytes: 64,
+  maxStrokes: 4_096,
+  maxPointsPerStroke: 8_192,
+  maxTotalPoints: 65_536,
+  maxStateBytes: 7_500_000,
+  maxEphemeralLifetimeMs: 60_000,
+});
 
 let nextEventNumber = 1;
 
@@ -54,11 +67,11 @@ export function validateBoardEvent(event) {
     return invalid("event must be an object");
   }
 
-  if (!isNonEmptyString(event.id)) {
+  if (!isBoundedString(event.id, RELAY_LIMITS.eventIdBytes)) {
     return invalid("missing id");
   }
 
-  if (!isNonEmptyString(event.boardId)) {
+  if (!isBoundedString(event.boardId, RELAY_LIMITS.boardIdBytes)) {
     return invalid("missing boardId");
   }
 
@@ -83,7 +96,7 @@ export function validateBoardEvent(event) {
   }
 
   if (event.type === "stroke:start") {
-    return validateStrokeStartPayload(event.payload);
+    return validateStrokeStartPayload(event.payload, event.at);
   }
 
   if (event.type === "stroke:point") {
@@ -99,7 +112,7 @@ export function validateBoardEvent(event) {
   }
 
   if (event.type === "board:restore") {
-    return validateRestorePayload(event.payload);
+    return validateRestorePayload(event.payload, event.at);
   }
 
   if (event.type === "pointer:show" || event.type === "pointer:move") {
@@ -160,10 +173,10 @@ function validateBackgroundSnapshot(background) {
 
   if (
     !isNonEmptyString(background.dataUrl) ||
-    !background.dataUrl.startsWith("data:image/") ||
-    background.dataUrl.length > MAX_BACKGROUND_DATA_URL_LENGTH
+    !background.dataUrl.startsWith("data:image/jpeg;base64,") ||
+    utf8ByteLength(background.dataUrl) > MAX_BACKGROUND_DATA_URL_LENGTH
   ) {
-    return invalid("background dataUrl must be a data:image URL");
+    return invalid("background dataUrl must be a normalized JPEG data URL");
   }
 
   if (!isValidBackgroundDimension(background.width)) {
@@ -177,7 +190,7 @@ function validateBackgroundSnapshot(background) {
   return { valid: true };
 }
 
-function validateStrokeStartPayload(payload) {
+function validateStrokeStartPayload(payload, eventAt) {
   const strokeIdResult = validateStrokeIdPayload(payload);
   if (!strokeIdResult.valid) {
     return strokeIdResult;
@@ -191,7 +204,7 @@ function validateStrokeStartPayload(payload) {
     return invalid("tool is not allowed for surface");
   }
 
-  if (!isNonEmptyString(payload.color)) {
+  if (!isBoundedString(payload.color, RELAY_LIMITS.colorBytes)) {
     return invalid("missing color");
   }
 
@@ -224,6 +237,13 @@ function validateStrokeStartPayload(payload) {
     return invalid("invalid expiresAt");
   }
 
+  if (
+    payload.ephemeral === true &&
+    payload.expiresAt > eventAt + RELAY_LIMITS.maxEphemeralLifetimeMs
+  ) {
+    return invalid("expiresAt exceeds the ephemeral lifetime limit");
+  }
+
   return { valid: true };
 }
 
@@ -237,14 +257,14 @@ function validateStrokePointPayload(payload) {
 }
 
 function validateStrokeIdPayload(payload) {
-  if (!isNonEmptyString(payload.strokeId)) {
+  if (!isBoundedString(payload.strokeId, RELAY_LIMITS.strokeIdBytes)) {
     return invalid("missing strokeId");
   }
 
   return { valid: true };
 }
 
-function validateRestorePayload(payload) {
+function validateRestorePayload(payload, eventAt) {
   const surfaceResult = validateSurfacePayload(payload);
   if (!surfaceResult.valid) {
     return surfaceResult;
@@ -254,6 +274,14 @@ function validateRestorePayload(payload) {
     return invalid("strokes must be an array");
   }
 
+  if (payload.strokes.length > RELAY_LIMITS.maxStrokes) {
+    return invalid("stroke count exceeds the state limit");
+  }
+
+  if (utf8ByteLength(JSON.stringify(payload)) > RELAY_LIMITS.maxStateBytes) {
+    return invalid("serialized state exceeds the byte limit");
+  }
+
   if (hasOwn(payload, "background")) {
     const backgroundResult = validateBackgroundSnapshot(payload.background);
     if (!backgroundResult.valid) {
@@ -261,17 +289,29 @@ function validateRestorePayload(payload) {
     }
   }
 
+  const strokeIds = new Set();
+  let totalPoints = 0;
   for (const stroke of payload.strokes) {
-    const strokeResult = validateRestoredStroke(stroke);
+    const strokeResult = validateRestoredStroke(stroke, eventAt);
     if (!strokeResult.valid) {
       return strokeResult;
+    }
+
+    if (strokeIds.has(stroke.strokeId)) {
+      return invalid("restore contains duplicate stroke IDs");
+    }
+    strokeIds.add(stroke.strokeId);
+
+    totalPoints += stroke.points.length;
+    if (totalPoints > RELAY_LIMITS.maxTotalPoints) {
+      return invalid("total point count exceeds the state limit");
     }
   }
 
   return validatePointerSnapshot(payload.pointer);
 }
 
-function validateRestoredStroke(stroke) {
+function validateRestoredStroke(stroke, eventAt) {
   if (!isPlainObject(stroke)) {
     return invalid("stroke must be an object");
   }
@@ -289,7 +329,7 @@ function validateRestoredStroke(stroke) {
     return invalid("tool is not allowed for stroke surface");
   }
 
-  if (!isNonEmptyString(stroke.color)) {
+  if (!isBoundedString(stroke.color, RELAY_LIMITS.colorBytes)) {
     return invalid("missing stroke color");
   }
 
@@ -303,6 +343,10 @@ function validateRestoredStroke(stroke) {
 
   if (!Array.isArray(stroke.points) || stroke.points.length === 0) {
     return invalid("stroke points must be a non-empty array");
+  }
+
+  if (stroke.points.length > RELAY_LIMITS.maxPointsPerStroke) {
+    return invalid("stroke point count exceeds the state limit");
   }
 
   for (const point of stroke.points) {
@@ -330,6 +374,13 @@ function validateRestoredStroke(stroke) {
 
   if (hasOwn(stroke, "expiresAt") && !Number.isFinite(stroke.expiresAt)) {
     return invalid("invalid stroke expiresAt");
+  }
+
+  if (
+    stroke.ephemeral === true &&
+    stroke.expiresAt > eventAt + RELAY_LIMITS.maxEphemeralLifetimeMs
+  ) {
+    return invalid("stroke expiresAt exceeds the ephemeral lifetime limit");
   }
 
   return { valid: true };
@@ -397,6 +448,14 @@ function isPlainObject(value) {
 
 function isNonEmptyString(value) {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function isBoundedString(value, maxBytes) {
+  return isNonEmptyString(value) && utf8ByteLength(value) <= maxBytes;
+}
+
+export function utf8ByteLength(value) {
+  return UTF8_ENCODER.encode(value).byteLength;
 }
 
 function isUnitNumber(value) {

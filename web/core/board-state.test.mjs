@@ -6,6 +6,7 @@ import {
   createBoardState,
   snapshotBoardState,
 } from "./board-state.js";
+import { RELAY_LIMITS, utf8ByteLength } from "./protocol.js";
 
 let nextEventNumber = 1;
 
@@ -113,15 +114,146 @@ test("stroke:start creates a stroke with style, surface, first normalized point,
   assert.equal(state.activeStrokes.get("stroke_1"), state.strokes[0]);
 });
 
-test("duplicate stroke:start for an active ID does not crash and activeStrokes points to the latest stroke", () => {
+test("duplicate stroke IDs do not append or widen undo", () => {
   const state = createBoardState();
 
   applyBoardEvent(state, makeStrokeStart("stroke_1", { color: "#111111" }));
+  applyBoardEvent(state, makeEvent("stroke:end", { strokeId: "stroke_1" }));
   applyBoardEvent(state, makeStrokeStart("stroke_1", { color: "#222222" }));
 
-  assert.equal(state.strokes.length, 2);
-  assert.equal(state.activeStrokes.get("stroke_1"), state.strokes[1]);
-  assert.equal(state.activeStrokes.get("stroke_1").color, "#222222");
+  assert.equal(state.strokes.length, 1);
+  assert.equal(state.strokes[0].color, "#111111");
+  assert.equal(state.activeStrokes.has("stroke_1"), false);
+});
+
+test("stroke count budget rejects the 4,097th retained stroke", () => {
+  const state = createBoardState();
+
+  for (let index = 0; index < RELAY_LIMITS.maxStrokes; index += 1) {
+    applyBoardEvent(state, makeStrokeStart(`stroke_budget_${index}`));
+  }
+  applyBoardEvent(state, makeStrokeStart("stroke_budget_overflow"));
+
+  assert.equal(state.strokes.length, RELAY_LIMITS.maxStrokes);
+  assert.equal(state.strokeIds.has("stroke_budget_overflow"), false);
+});
+
+test("per-stroke point budget rejects the 8,193rd point", () => {
+  const state = createBoardState();
+  applyBoardEvent(state, makeStrokeStart("stroke_point_budget"));
+
+  for (let index = 1; index < RELAY_LIMITS.maxPointsPerStroke; index += 1) {
+    applyBoardEvent(state, makeEvent("stroke:point", {
+      strokeId: "stroke_point_budget",
+      point: { x: 0.4, y: 0.6 },
+    }));
+  }
+  applyBoardEvent(state, makeEvent("stroke:point", {
+    strokeId: "stroke_point_budget",
+    point: { x: 0.7, y: 0.8 },
+  }));
+
+  assert.equal(
+    state.strokes[0].points.length,
+    RELAY_LIMITS.maxPointsPerStroke,
+  );
+  assert.equal(state.totalPoints, RELAY_LIMITS.maxPointsPerStroke);
+});
+
+test("total point budget rejects the 65,537th retained point", () => {
+  const state = createBoardState();
+  const points = Array.from(
+    { length: RELAY_LIMITS.maxPointsPerStroke - 1 },
+    () => ({ x: 0.1, y: 0.2 }),
+  );
+  const strokes = Array.from({ length: 8 }, (_value, index) => ({
+    strokeId: `restored_full_${index}`,
+    surface: "whiteboard",
+    tool: "marker",
+    color: "#111111",
+    width: 3,
+    points,
+    complete: true,
+  }));
+  strokes.push({
+    ...strokes[0],
+    strokeId: "restored_active",
+    points: Array.from({ length: 7 }, () => ({ x: 0.2, y: 0.3 })),
+    complete: false,
+  });
+
+  applyBoardEvent(state, makeEvent("board:restore", {
+    surface: "whiteboard",
+    strokes,
+    pointer: { visible: false, point: null },
+  }));
+  applyBoardEvent(state, makeEvent("stroke:point", {
+    strokeId: "restored_active",
+    point: { x: 0.4, y: 0.5 },
+  }));
+  applyBoardEvent(state, makeEvent("stroke:point", {
+    strokeId: "restored_active",
+    point: { x: 0.6, y: 0.7 },
+  }));
+
+  assert.equal(state.totalPoints, RELAY_LIMITS.maxTotalPoints);
+  assert.equal(state.strokes.at(-1).points.length, 8);
+});
+
+test("retained byte budget accepts the boundary and rejects the next byte growth", () => {
+  const state = createBoardState();
+  applyBoardEvent(state, makeStrokeStart("stroke_byte_budget"));
+  const point = { x: 0.4, y: 0.6, pressure: 0 };
+  const pointDelta = 1 + utf8ByteLength(JSON.stringify(point));
+  state.retainedBytes = RELAY_LIMITS.maxStateBytes - pointDelta;
+
+  applyBoardEvent(state, makeEvent("stroke:point", {
+    strokeId: "stroke_byte_budget",
+    point,
+  }));
+  applyBoardEvent(state, makeEvent("stroke:point", {
+    strokeId: "stroke_byte_budget",
+    point: { x: 0.7, y: 0.8, pressure: 0 },
+  }));
+
+  assert.equal(state.retainedBytes, RELAY_LIMITS.maxStateBytes);
+  assert.equal(state.strokes[0].points.length, 2);
+});
+
+test("restore rejects duplicate IDs and rebuilds retained accounting", () => {
+  const state = createBoardState();
+  const restoredStroke = {
+    strokeId: "restored_accounting",
+    surface: "whiteboard",
+    tool: "marker",
+    color: "#111111",
+    width: 3,
+    points: [{ x: 0.1, y: 0.2 }, { x: 0.3, y: 0.4 }],
+    complete: false,
+  };
+  const duplicateRestore = makeEvent("board:restore", {
+    surface: "whiteboard",
+    strokes: [restoredStroke, structuredClone(restoredStroke)],
+    pointer: { visible: false, point: null },
+  });
+  const before = snapshotBoardState(state);
+
+  applyBoardEvent(state, duplicateRestore);
+  assert.deepEqual(snapshotBoardState(state), before);
+
+  applyBoardEvent(state, makeEvent("board:restore", {
+    surface: "whiteboard",
+    strokes: [restoredStroke],
+    pointer: { visible: false, point: null },
+  }));
+
+  assert.equal(state.strokeIds.size, 1);
+  assert.equal(state.strokeBytes.size, 1);
+  assert.equal(state.totalPoints, 2);
+  assert.equal(
+    state.retainedBytes,
+    utf8ByteLength(JSON.stringify(snapshotBoardState(state))),
+  );
 });
 
 test("applied event ID tracking is bounded for long sessions", () => {
@@ -292,7 +424,7 @@ test("board:restore replaces snapshot state and rebuilds activeStrokes", () => {
     surface: "greenboard",
     background: {
       kind: "image",
-      dataUrl: "data:image/png;base64,restored",
+      dataUrl: "data:image/jpeg;base64,restored",
       width: 640,
       height: 360,
     },
@@ -327,7 +459,7 @@ test("board:restore replaces snapshot state and rebuilds activeStrokes", () => {
   assert.equal(state.surface, "greenboard");
   assert.deepEqual(state.background, {
     kind: "image",
-    dataUrl: "data:image/png;base64,restored",
+    dataUrl: "data:image/jpeg;base64,restored",
     width: 640,
     height: 360,
   });

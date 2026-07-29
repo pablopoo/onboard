@@ -111,7 +111,7 @@ test("validateBoardEvent accepts board:restore with a board snapshot payload", (
     surface: "blackboard",
     background: {
       kind: "image",
-      dataUrl: "data:image/png;base64,restored",
+      dataUrl: "data:image/jpeg;base64,restored",
       width: 640,
       height: 360,
     },
@@ -518,6 +518,87 @@ test("validateBoardEvent rejects invalid at, expiresAt, id, boardId, and strokeI
     assert.equal(result.valid, false);
     assert.match(result.reason, /expiresAt/i);
   }
+});
+
+test("relay identifiers are bounded by UTF-8 bytes", () => {
+  const oversizedEventId = makeEvent("pointer:hide", {}, {
+    id: "é".repeat(65),
+  });
+  assert.equal(validateBoardEvent(oversizedEventId).valid, false);
+
+  const oversizedBoardId = makeEvent("pointer:hide", {}, {
+    boardId: "b".repeat(65),
+  });
+  assert.equal(validateBoardEvent(oversizedBoardId).valid, false);
+
+  const oversizedStrokeId = makeEvent("stroke:expire", {
+    strokeId: "s".repeat(129),
+  });
+  assert.equal(validateBoardEvent(oversizedStrokeId).valid, false);
+
+  const boundaryEvent = makeEvent("stroke:start", {
+    strokeId: "s".repeat(128),
+    surface: "whiteboard",
+    tool: "marker",
+    color: "c".repeat(64),
+    width: 3,
+    point: { x: 0.1, y: 0.2 },
+  }, {
+    id: "e".repeat(128),
+    boardId: "b".repeat(64),
+  });
+  assert.deepEqual(validateBoardEvent(boundaryEvent), { valid: true });
+});
+
+test("stroke colors are bounded by UTF-8 bytes", () => {
+  const event = makeEvent("stroke:start", {
+    strokeId: "stroke_color_limit",
+    surface: "whiteboard",
+    tool: "marker",
+    color: "é".repeat(33),
+    width: 3,
+    point: { x: 0.1, y: 0.2 },
+  });
+
+  assert.equal(validateBoardEvent(event).valid, false);
+});
+
+test("background accepts only normalized JPEG data", () => {
+  const event = makeEvent("board:set-background", {
+    background: {
+      kind: "image",
+      dataUrl: "data:image/svg+xml,<svg/>",
+      width: 1,
+      height: 1,
+    },
+  });
+
+  assert.equal(validateBoardEvent(event).valid, false);
+});
+
+test("ephemeral expiry is bounded to sixty seconds after the event", () => {
+  const payload = {
+    strokeId: "stroke_expiry_limit",
+    surface: "whiteboard",
+    tool: "marker",
+    color: "#111111",
+    width: 3,
+    point: { x: 0.1, y: 0.2 },
+    ephemeral: true,
+    expiresAt: 61_001,
+  };
+
+  assert.equal(
+    validateBoardEvent(makeEvent("stroke:start", payload, { at: 1_000 })).valid,
+    false,
+  );
+  assert.deepEqual(
+    validateBoardEvent(makeEvent("stroke:start", {
+      ...payload,
+      expiresAt: 61_000,
+    }, { at: 1_000 })),
+    { valid: true },
+  );
 });
 
 test("validateBoardEvent rejects invalid tool and surface combinations", () => {

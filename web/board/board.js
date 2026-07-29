@@ -100,8 +100,6 @@ const SESSION_STATUS_LABELS = {
   "Input paused": "Paused",
 };
 
-let nextStrokeNumber = 1;
-
 export function createRelayURL(location, role = "") {
   const base = `${location.protocol}//${location.host}`;
   const url = new URL("/ws/relay", base);
@@ -133,6 +131,7 @@ export function createBoardController({
   manageSessionStatus = true,
   viewerURL = "/viewer",
   copyText = defaultCopyText,
+  eventSessionId = createEventSessionId(),
 } = {}) {
   if (!elements?.canvas) {
     throw new TypeError("board controller requires a canvas element");
@@ -179,9 +178,9 @@ export function createBoardController({
   let presenterLocked = false;
   let closed = false;
   let nextEventNumber = 1;
+  let nextStrokeNumber = 1;
   let compactViewport = isCompactMobileViewport();
   let toolbarExpanded = !compactViewport;
-  const eventSessionId = createEventSessionId();
   const queuedEvents = [];
   let queuedEventBytes = 0;
   const undoStack = [];
@@ -785,6 +784,15 @@ export function createBoardController({
       "0",
     )}`;
     nextEventNumber += 1;
+    return id;
+  }
+
+  function nextStrokeId() {
+    const id = `stroke_${eventSessionId}_${String(nextStrokeNumber).padStart(
+      6,
+      "0",
+    )}`;
+    nextStrokeNumber += 1;
     return id;
   }
 
@@ -1883,12 +1891,6 @@ function createEventSessionId() {
   }
 
   return Array.from(bytes, (value) => value.toString(36)).join("");
-}
-
-function nextStrokeId() {
-  const id = `stroke_${String(nextStrokeNumber).padStart(6, "0")}`;
-  nextStrokeNumber += 1;
-  return id;
 }
 
 if (typeof globalThis.document !== "undefined") {

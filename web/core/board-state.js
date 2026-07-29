@@ -1,9 +1,14 @@
-import { normalizePoint, validateBoardEvent } from "./protocol.js";
+import {
+  normalizePoint,
+  RELAY_LIMITS,
+  utf8ByteLength,
+  validateBoardEvent,
+} from "./protocol.js";
 
 const RECENT_EVENT_ID_LIMIT = 8192;
 
 export function createBoardState() {
-  return {
+  const state = {
     surface: "whiteboard",
     background: null,
     strokes: [],
@@ -12,6 +17,8 @@ export function createBoardState() {
     appliedEventIdOrder: [],
     pointer: { visible: false, point: null },
   };
+  rebuildStateAccounting(state);
+  return state;
 }
 
 export function applyBoardEvent(state, event) {
@@ -20,6 +27,7 @@ export function applyBoardEvent(state, event) {
   }
 
   ensureEventIdTracking(state);
+  ensureStateAccounting(state);
 
   if (state.appliedEventIds.has(event.id)) {
     return state;
@@ -28,18 +36,41 @@ export function applyBoardEvent(state, event) {
   const { payload } = event;
 
   if (event.type === "board:set-surface") {
+    const retainedBytes =
+      state.retainedBytes - serializedBytes(state.surface) +
+      serializedBytes(payload.surface);
+    if (retainedBytes > RELAY_LIMITS.maxStateBytes) {
+      return state;
+    }
     state.surface = payload.surface;
+    state.retainedBytes = retainedBytes;
     rememberAppliedEventId(state, event.id);
     return state;
   }
 
   if (event.type === "board:set-background") {
-    state.background = copyBackground(payload.background);
+    const background = copyBackground(payload.background);
+    const retainedBytes =
+      state.retainedBytes - serializedBytes(state.background) +
+      serializedBytes(background);
+    if (retainedBytes > RELAY_LIMITS.maxStateBytes) {
+      return state;
+    }
+    state.background = background;
+    state.retainedBytes = retainedBytes;
     rememberAppliedEventId(state, event.id);
     return state;
   }
 
   if (event.type === "stroke:start") {
+    if (
+      state.strokeIds.has(payload.strokeId) ||
+      state.strokes.length >= RELAY_LIMITS.maxStrokes ||
+      state.totalPoints >= RELAY_LIMITS.maxTotalPoints
+    ) {
+      return state;
+    }
+
     const stroke = {
       strokeId: payload.strokeId,
       surface: payload.surface,
@@ -58,8 +89,19 @@ export function applyBoardEvent(state, event) {
       stroke.expiresAt = payload.expiresAt;
     }
 
+    const strokeByteLength = serializedBytes(stroke);
+    const retainedBytes =
+      state.retainedBytes + strokeByteLength + (state.strokes.length > 0 ? 1 : 0);
+    if (retainedBytes > RELAY_LIMITS.maxStateBytes) {
+      return state;
+    }
+
     state.strokes.push(stroke);
     state.activeStrokes.set(payload.strokeId, stroke);
+    state.strokeIds.add(payload.strokeId);
+    state.strokeBytes.set(payload.strokeId, strokeByteLength);
+    state.totalPoints += 1;
+    state.retainedBytes = retainedBytes;
     rememberAppliedEventId(state, event.id);
     return state;
   }
@@ -70,7 +112,28 @@ export function applyBoardEvent(state, event) {
       return state;
     }
 
-    stroke.points.push(normalizePoint(payload.point));
+    if (
+      stroke.points.length >= RELAY_LIMITS.maxPointsPerStroke ||
+      state.totalPoints >= RELAY_LIMITS.maxTotalPoints
+    ) {
+      return state;
+    }
+
+    const point = normalizePoint(payload.point);
+    const pointByteLength = serializedBytes(point) + 1;
+    if (
+      state.retainedBytes + pointByteLength > RELAY_LIMITS.maxStateBytes
+    ) {
+      return state;
+    }
+
+    stroke.points.push(point);
+    state.strokeBytes.set(
+      payload.strokeId,
+      state.strokeBytes.get(payload.strokeId) + pointByteLength,
+    );
+    state.totalPoints += 1;
+    state.retainedBytes += pointByteLength;
     rememberAppliedEventId(state, event.id);
     return state;
   }
@@ -81,51 +144,63 @@ export function applyBoardEvent(state, event) {
       return state;
     }
 
+    const oldStrokeBytes = state.strokeBytes.get(payload.strokeId);
     stroke.complete = true;
+    const newStrokeBytes = serializedBytes(stroke);
+    state.strokeBytes.set(payload.strokeId, newStrokeBytes);
+    state.retainedBytes += newStrokeBytes - oldStrokeBytes;
     state.activeStrokes.delete(payload.strokeId);
     rememberAppliedEventId(state, event.id);
     return state;
   }
 
   if (event.type === "stroke:expire") {
-    const beforeCount = state.strokes.length;
-    state.strokes = state.strokes.filter(
-      (stroke) =>
-        stroke.strokeId !== payload.strokeId || stroke.ephemeral !== true,
+    const stroke = state.strokes.find(
+      (candidate) => candidate.strokeId === payload.strokeId,
     );
-    if (state.strokes.length === beforeCount) {
+    if (!stroke || stroke.ephemeral !== true) {
       return state;
     }
 
-    const activeStroke = state.activeStrokes.get(payload.strokeId);
-    if (activeStroke?.ephemeral === true) {
-      state.activeStrokes.delete(payload.strokeId);
-    }
+    removeStroke(state, stroke);
 
     rememberAppliedEventId(state, event.id);
     return state;
   }
 
   if (event.type === "board:undo") {
-    const beforeCount = state.strokes.length;
-    state.strokes = state.strokes.filter(
-      (stroke) => stroke.strokeId !== payload.strokeId,
+    const stroke = state.strokes.find(
+      (candidate) => candidate.strokeId === payload.strokeId,
     );
-    if (state.strokes.length === beforeCount) {
+    if (!stroke) {
       return state;
     }
 
-    rebuildActiveStrokes(state);
+    removeStroke(state, stroke);
     rememberAppliedEventId(state, event.id);
     return state;
   }
 
   if (event.type === "board:restore") {
+    const background = copyBackground(payload.background ?? null);
+    const strokes = payload.strokes.map(copyRestoredStroke);
+    const pointer = copyRestoredPointer(payload.pointer);
+    const snapshot = {
+      surface: payload.surface,
+      background,
+      strokes,
+      pointer,
+    };
+    if (serializedBytes(snapshot) > RELAY_LIMITS.maxStateBytes) {
+      return state;
+    }
+
     state.surface = payload.surface;
-    state.background = copyBackground(payload.background ?? null);
-    state.strokes = payload.strokes.map(copyRestoredStroke);
+    state.background = background;
+    state.strokes = strokes;
     rebuildActiveStrokes(state);
-    state.pointer = copyRestoredPointer(payload.pointer);
+    state.pointer = pointer;
+    rebuildStateAccounting(state);
     rememberAppliedEventId(state, event.id);
     return state;
   }
@@ -135,21 +210,34 @@ export function applyBoardEvent(state, event) {
     state.strokes = [];
     state.activeStrokes.clear();
     state.pointer = { visible: false, point: null };
+    rebuildStateAccounting(state);
     rememberAppliedEventId(state, event.id);
     return state;
   }
 
   if (event.type === "pointer:show" || event.type === "pointer:move") {
-    state.pointer = {
+    const pointer = {
       visible: true,
       point: normalizePoint(payload.point),
     };
+    const retainedBytes =
+      state.retainedBytes - serializedBytes(state.pointer) +
+      serializedBytes(pointer);
+    if (retainedBytes > RELAY_LIMITS.maxStateBytes) {
+      return state;
+    }
+    state.pointer = pointer;
+    state.retainedBytes = retainedBytes;
     rememberAppliedEventId(state, event.id);
     return state;
   }
 
   if (event.type === "pointer:hide") {
-    state.pointer = { visible: false, point: null };
+    const pointer = { visible: false, point: null };
+    state.retainedBytes =
+      state.retainedBytes - serializedBytes(state.pointer) +
+      serializedBytes(pointer);
+    state.pointer = pointer;
     rememberAppliedEventId(state, event.id);
     return state;
   }
@@ -183,6 +271,48 @@ function rememberAppliedEventId(state, id) {
 
   const oldest = state.appliedEventIdOrder.shift();
   state.appliedEventIds.delete(oldest);
+}
+
+function ensureStateAccounting(state) {
+  if (
+    !(state.strokeIds instanceof Set) ||
+    !(state.strokeBytes instanceof Map) ||
+    !Number.isFinite(state.totalPoints) ||
+    !Number.isFinite(state.retainedBytes)
+  ) {
+    rebuildStateAccounting(state);
+  }
+}
+
+function rebuildStateAccounting(state) {
+  state.strokeIds = new Set();
+  state.strokeBytes = new Map();
+  state.totalPoints = 0;
+
+  for (const stroke of state.strokes) {
+    state.strokeIds.add(stroke.strokeId);
+    state.strokeBytes.set(stroke.strokeId, serializedBytes(stroke));
+    state.totalPoints += stroke.points.length;
+  }
+
+  state.retainedBytes = serializedBytes(snapshotBoardState(state));
+}
+
+function removeStroke(state, stroke) {
+  const separatorBytes = state.strokes.length > 1 ? 1 : 0;
+  state.retainedBytes -=
+    state.strokeBytes.get(stroke.strokeId) + separatorBytes;
+  state.totalPoints -= stroke.points.length;
+  state.strokeIds.delete(stroke.strokeId);
+  state.strokeBytes.delete(stroke.strokeId);
+  state.activeStrokes.delete(stroke.strokeId);
+  state.strokes = state.strokes.filter(
+    (candidate) => candidate.strokeId !== stroke.strokeId,
+  );
+}
+
+function serializedBytes(value) {
+  return utf8ByteLength(JSON.stringify(value));
 }
 
 export function snapshotBoardState(state) {

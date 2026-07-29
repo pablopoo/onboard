@@ -423,6 +423,7 @@ function createFixture(options = {}) {
     maxQueuedEvents: options.maxQueuedEvents,
     maxQueuedEventBytes: options.maxQueuedEventBytes,
     maxUndoBytes: options.maxUndoBytes,
+    eventSessionId: options.eventSessionId,
     manageSessionStatus: options.manageSessionStatus,
     viewerURL: options.viewerURL,
     copyText: options.copyText,
@@ -634,6 +635,27 @@ test("local publish uses a board-specific ID when relay snapshot already has evt
   assert.equal(transport.sent[0].payload.surface, "greenboard");
   assert.notEqual(transport.sent[0].id, "evt_000001");
   assert.match(transport.sent[0].id, /^evt_board_[a-z0-9]+_000001$/);
+});
+
+test("stroke IDs include the controller session across Board reloads", async () => {
+  const first = createFixture({ eventSessionId: "session-a" });
+  const second = createFixture({ eventSessionId: "session-b" });
+
+  await first.controller.connect();
+  await second.controller.connect();
+  first.elements.canvas.dispatch("pointerdown", {
+    clientX: 60,
+    clientY: 70,
+    pointerId: 1,
+  });
+  second.elements.canvas.dispatch("pointerdown", {
+    clientX: 60,
+    clientY: 70,
+    pointerId: 2,
+  });
+
+  assert.equal(first.transport.sent[0].payload.strokeId, "stroke_session-a_000001");
+  assert.equal(second.transport.sent[0].payload.strokeId, "stroke_session-b_000001");
 });
 
 test("surface change sends board:set-surface and updates local state immediately", async () => {
@@ -1221,7 +1243,7 @@ test("background file input publishes a shared image background", async () => {
       readFiles.push(selectedFile);
       return Promise.resolve({
         kind: "image",
-        dataUrl: "data:image/png;base64,uploaded",
+        dataUrl: "data:image/jpeg;base64,uploaded",
         width: 1024,
         height: 768,
       });
@@ -1237,13 +1259,13 @@ test("background file input publishes a shared image background", async () => {
   assert.equal(transport.sent.at(-1).type, "board:set-background");
   assert.deepEqual(transport.sent.at(-1).payload.background, {
     kind: "image",
-    dataUrl: "data:image/png;base64,uploaded",
+    dataUrl: "data:image/jpeg;base64,uploaded",
     width: 1024,
     height: 768,
   });
   assert.deepEqual(controller.getSnapshot().background, {
     kind: "image",
-    dataUrl: "data:image/png;base64,uploaded",
+    dataUrl: "data:image/jpeg;base64,uploaded",
     width: 1024,
     height: 768,
   });
@@ -1256,7 +1278,7 @@ test("background file input rejects image snapshots outside the relay contract",
     readBackgroundFile() {
       return Promise.resolve({
         kind: "image",
-        dataUrl: "data:image/png;base64,uploaded",
+        dataUrl: "data:image/jpeg;base64,uploaded",
         width: 8193,
         height: 768,
       });
@@ -1284,7 +1306,7 @@ test("pasting an image file publishes it as the shared background", async () => 
       assert.equal(file, imageFile);
       return Promise.resolve({
         kind: "image",
-        dataUrl: "data:image/png;base64,pasted",
+        dataUrl: "data:image/jpeg;base64,pasted",
         width: 640,
         height: 360,
       });
@@ -1301,7 +1323,7 @@ test("pasting an image file publishes it as the shared background", async () => 
   await flushAsyncWork();
 
   assert.equal(transport.sent.at(-1).type, "board:set-background");
-  assert.equal(transport.sent.at(-1).payload.background.dataUrl, "data:image/png;base64,pasted");
+  assert.equal(transport.sent.at(-1).payload.background.dataUrl, "data:image/jpeg;base64,pasted");
 });
 
 test("capture button publishes a display screenshot background when supported", async () => {
