@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-Onboard includes `github.com/coder/websocket v1.8.14`, distributed under the
+Onboard includes `github.com/coder/websocket v1.8.15`, distributed under the
 ISC License:
 
 Copyright (c) 2025 Coder
